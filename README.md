@@ -50,19 +50,19 @@ The minimum software packages required to run OpenIFS on Linux (and UNIX-like op
 
 OpenIFS is available directly from this repository and it can be extracted by either cloning or downloading the package:
 
-* Extract the entire OpenIFS repository by either executing the following command in the directory where you want to extract OpenIFS
-  * `git clone https://github.com/ecmwf-ifs/openifs.git`
 * Extract just the release branch using a shallow clone that targets a specific release branch, e.g.
-  * `git clone --depth 1 --branch release/openifs-48r1 --single-branch https://github.com/ecmwf-ifs/openifs.git openifs-48r1`
+  * `git clone --depth 1 --branch openifs-lts/CY48R1.1 --single-branch https://github.com/ecmwf-ifs/openifs.git openifs-48r1.1`
 * Extract a tagged release (shallow clone):
-  * `git clone --depth 1 --branch TAG --single-branch https://github.com/ecmwf-ifs/openifs.git openifs-TAG`
+  * `git clone --depth 1 --branch openifs-48r1.1.0 --single-branch https://github.com/ecmwf-ifs/openifs.git openifs-48r1.1.0`
 
 > Note: cloning a tag will result in a detached HEAD. If you plan to make commits, create a branch at that tag after cloning:
 
 ```bash
-cd openifs-TAG
+cd TAG
 git switch -c my-branch-at-TAG
 ```
+
+where TAG is the tag in the repository.
 
 ### Building OpenIFS
 
