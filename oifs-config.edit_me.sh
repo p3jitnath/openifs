@@ -23,24 +23,26 @@
 
 export OIFS_HOST="local"
 export OIFS_PLATFORM="local"
+export GWS_IFS="${GWS}/ifs"
 
 #--- set principal OIFS variables ------------------------------
 
 export OIFS_CYCLE=48r1
 export OIFS_CLIMATE="climate.v020"
 
+
 #---Base code assumes openifs and openifs-expt are installed
 #---in $HOME. Either these can be changed by the user------------
-export OIFS_HOME="${HOME}/openifs"
+export OIFS_HOME="${GWS_IFS}/openifs-48r1.1"
 
 #---Central location for non-openifs bundle source code, which
 #---is required for the build and run. This only needs to be set
 #---if not using the standard download of source to OIFS_HOME.
-export OIFS_CENTRAL_SRC="${HOME}/openifs-bundle-src"
+export OIFS_CENTRAL_SRC="${OIFS_HOME}/openifs-bundle-src"
 
 #---It is recommended that the openifs-expt and oifs_data dir
 #---exist in a location designed for permanent storage-----------
-export OIFS_EXPT="${HOME}/openifs-expt"
+export OIFS_EXPT="${OIFS_HOME}/openifs-expt"
 export OIFS_DATA_DIR="${OIFS_HOME}/openifs-data"
 
 #---Set the path for the arch directory. Depending on system,i.e.,

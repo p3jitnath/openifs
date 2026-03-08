@@ -22,3 +22,8 @@ __pycache__/
 
 # User-specific Docker config
 scripts/docker/config/my_config.yml
+
+# OpenIFS specific
+bin/
+openifs-data/
+openifs-expt/

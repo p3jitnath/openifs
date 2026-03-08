@@ -278,12 +278,14 @@ done
 if [[ ${DO_CREATE} == 1 ]] ; then
   # Check if this release of ifs-bundle includes the self-titled
   # script
-  if [[ -x "./openifs-bundle" ]] ; then
-      log_echo "[INFO]: Create command is ./openifs-bundle create --threads=${NUM_THREADS} --shallow --update"
-      ./openifs-bundle create \
+  if [[ -x "${OIFS_HOME}/openifs-bundle" ]] ; then
+      log_echo "[INFO]: Create command is ${OIFS_HOME}/openifs-bundle create --threads=${NUM_THREADS} --shallow --update"
+      ${OIFS_HOME}/openifs-bundle create \
           --threads="${NUM_THREADS}" \
           --shallow \
-          --update
+          --update \
+          --src-dir="${OIFS_HOME}/source" \
+          --bundle="${OIFS_HOME}"
       log_echo "[INFO]: See $OIFS_LOGFILE for details of bundle download and create."
       log_echo "[INFO]: Create step of build complete, moving onto build"
   fi
@@ -292,11 +294,14 @@ fi
 if [[ ${DO_BUILD} == 1 ]] ; then
     log_echo "[INFO]: Build launcher - ${IGT_BUILD_LAUNCHER}"
     # Check if this release of ifs-bundle includes the self-titled script
-    if [[ -x "./openifs-bundle" ]]; then
-        log_echo "[INFO]: Build command - ${IGT_BUILD_LAUNCHER} ./openifs-bundle build \
+    if [[ -x "${OIFS_HOME}/openifs-bundle" ]]; then
+        log_echo "[INFO]: Build command - ${IGT_BUILD_LAUNCHER} ${OIFS_HOME}/openifs-bundle build \
 --threads=${NUM_THREADS} ${IFS_BUILD_EXTRA_FLAGS[@]:-}"
-        ${IGT_BUILD_LAUNCHER} ./openifs-bundle build \
+        ${IGT_BUILD_LAUNCHER} ${OIFS_HOME}/openifs-bundle build \
             --threads="${NUM_THREADS}" \
+            --src-dir="${OIFS_HOME}/source" \
+            --build-dir="${OIFS_HOME}/build" \
+            --install-dir="${OIFS_HOME}/bin" \
             "${IFS_BUILD_EXTRA_FLAGS[@]:-}"
         log_echo "[INFO]: build step complete"
         log_echo "[INFO]: See $OIFS_HOME/build/build.log for build details"
@@ -306,7 +311,7 @@ fi
 
 if [[ ${DO_TEST} == 1 ]] ; then
     if [[ "${LIST_LABELS}" == 1 ]] ; then
-        grep LABELS ./source/ifs-test/tests/*/CMakeLists.txt \
+        grep LABELS ${OIFS_HOME}/source/ifs-test/tests/*/CMakeLists.txt \
           | tr -s " " \
           | cut -d" " -f5- \
           | tr -d ")" \
@@ -315,8 +320,8 @@ if [[ ${DO_TEST} == 1 ]] ; then
           | uniq
     else
         log_echo "[INFO]: Test launcher: ${IGT_TEST_LAUNCHER}"
-        cd ./build
-        . ./env.sh
+        cd ${OIFS_HOME}/build
+        . ${OIFS_HOME}/build/env.sh
         # Don't add ' || true' to this - breaks use within 'git
         # bisect' (see IGT-85)
         ${IGT_TEST_LAUNCHER} ctest --tests-regex "^ifs_.*(${TESTS_REGEX})" \
@@ -350,7 +355,7 @@ if [[ ${DO_INSTALL} == 1 ]] ; then
 
       log_echo "[INFO]: cd $build_dir, to run the install.sh script, which will install OpenIFS in $OIFS_HOME/install "
 
-      ./install.sh | tee -a "$OIFS_LOGFILE"
+      ${OIFS_HOME}/install.sh | tee -a "$OIFS_LOGFILE"
 
       if grep -qEi 'Install took [0-9]+ seconds' "$OIFS_LOGFILE" && [[ -d "$install_dir" ]]; then
 

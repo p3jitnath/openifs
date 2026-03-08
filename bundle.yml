@@ -98,7 +98,7 @@ projects :
         bundle  : false
 
     - ifs-source :
-        dir     : $PWD/ifs-source
+        dir     : $OIFS_HOME/ifs-source
         version : 48.1.1
         bundle  : false
 
@@ -118,7 +118,7 @@ projects :
 
 
     - ifs-test :
-        dir     : $PWD/ifs-test
+        dir     : $OIFS_HOME/ifs-test
         version : 48.1.1
         cmake   : IFS_TEST_ENABLE_TESTS=ON
 
