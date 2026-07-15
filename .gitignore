@@ -11,7 +11,12 @@
 __pycache__/
 *.pyc
 .venv/
+.build-venv/
 *.egg-info/
+
+# Local credentials
+.cdsapirc
+.cdsapi-key
 
 # Fortran build artifacts
 *.o

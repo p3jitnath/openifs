@@ -25,6 +25,8 @@ cmake   : >
     FFTW_ENABLE_MKL=OFF
     ENABLE_SCMEC=OFF
     IFS_TEST_FORCE_FETCH=ON
+    PYTHON_EXECUTABLE=${OIFS_HOME}/.build-venv/bin/python
+    Python3_EXECUTABLE=${OIFS_HOME}/.build-venv/bin/python
 
 projects :
 
@@ -42,7 +44,8 @@ projects :
             ECCODES_ENABLE_FORTRAN=ON
             ECCODES_ENABLE_MEMFS=ON
             ECCODES_INSTALL_EXTRA_TOOLS=ON
-            ECCODES_ENABLE_AEC=ON
+            ECCODES_ENABLE_AEC=OFF
+            ENABLE_AEC=OFF
             ECCODES_ENABLE_JPG_LIBOPENJPEG=OFF
 
     - eckit :
