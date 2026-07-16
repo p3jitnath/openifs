@@ -11,12 +11,19 @@ typedef int (*compute_fn)(
     double, const double *, const double *, const double *, const double *,
     const double *, const double *, double *, double *, double *, double *,
     double *, double *, double *, double *, double *, double *);
+typedef int (*compute_lw_fn)(
+    int, int, int, int, int, int, int, const double *, const double *,
+    const double *, const double *, const double *, const double *, const int *,
+    double, const double *, const double *, const double *, const double *,
+    const double *, const double *, double *, double *, double *, double *,
+    double *, double *, double *);
 typedef const char *(*last_error_fn)(void);
 
 static pthread_once_t load_once = PTHREAD_ONCE_INIT;
 static void *cuda_library;
 static available_fn cuda_available;
 static compute_fn cuda_compute;
+static compute_lw_fn cuda_compute_lw;
 static last_error_fn cuda_last_error;
 static char load_error[512];
 
@@ -35,17 +42,43 @@ static void load_cuda_library(void) {
   cuda_available = (available_fn)dlsym(cuda_library,
                                       "oifs_cuda_radiation_available");
   cuda_compute = (compute_fn)dlsym(cuda_library, "oifs_cuda_sw_compute_dp");
+  cuda_compute_lw = (compute_lw_fn)dlsym(cuda_library, "oifs_cuda_lw_compute_dp");
   cuda_last_error = (last_error_fn)dlsym(
       cuda_library, "oifs_cuda_radiation_last_error");
-  if (cuda_available == NULL || cuda_compute == NULL || cuda_last_error == NULL) {
+  if (cuda_available == NULL || cuda_compute == NULL || cuda_compute_lw == NULL ||
+      cuda_last_error == NULL) {
     snprintf(load_error, sizeof(load_error),
              "CUDA radiation library has an incompatible API");
     dlclose(cuda_library);
     cuda_library = NULL;
     cuda_available = NULL;
     cuda_compute = NULL;
+    cuda_compute_lw = NULL;
     cuda_last_error = NULL;
   }
+}
+
+int oifs_cuda_bridge_lw_compute_dp(
+    int ng, int nbands, int nlev, int ncol,
+    int do_aerosol_scattering, int do_cloud_scattering, int do_derivatives,
+    const double *od, const double *ssa, const double *asymmetry,
+    const double *planck_hl, const double *emission, const double *albedo,
+    const int *band_from_g, double cloud_fraction_threshold,
+    const double *cloud_fraction, const double *total_cloud_cover,
+    const double *od_scaling, const double *od_cloud,
+    const double *ssa_cloud, const double *asymmetry_cloud,
+    double *lw_up_clear, double *lw_dn_clear, double *lw_up, double *lw_dn,
+    double *lw_dn_surf_clear_g, double *lw_dn_surf_g,
+    double *lw_derivatives) {
+  pthread_once(&load_once, load_cuda_library);
+  if (cuda_compute_lw == NULL) return -1;
+  return cuda_compute_lw(
+      ng, nbands, nlev, ncol, do_aerosol_scattering, do_cloud_scattering,
+      do_derivatives, od, ssa, asymmetry, planck_hl, emission, albedo,
+      band_from_g, cloud_fraction_threshold, cloud_fraction,
+      total_cloud_cover, od_scaling, od_cloud, ssa_cloud, asymmetry_cloud,
+      lw_up_clear, lw_dn_clear, lw_up, lw_dn, lw_dn_surf_clear_g,
+      lw_dn_surf_g, lw_derivatives);
 }
 
 int oifs_cuda_bridge_available(void) {

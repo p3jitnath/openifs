@@ -14,6 +14,16 @@
 
 module radiation_mcica_lw
 
+  implicit none
+
+#ifdef OIFS_CUDA_RADIATION
+  logical, save :: gpu_options_initialized = .false.
+  logical, save :: gpu_enabled_option = .false.
+  logical, save :: gpu_available_option = .false.
+  logical, save :: gpu_validate_option = .false.
+  integer, save :: gpu_min_columns_option = 256
+#endif
+
 contains
 
   !---------------------------------------------------------------------
@@ -46,6 +56,9 @@ contains
          &                               calc_fluxes_no_scattering_lw
     use radiation_lw_derivatives, only : calc_lw_derivatives_ica, modify_lw_derivatives_ica
     use radiation_cloud_generator, only: cloud_generator
+#ifdef OIFS_CUDA_RADIATION
+    use radiation_cuda_bridge, only   : cuda_radiation_available, cuda_lw_compute
+#endif
 
     implicit none
 
@@ -95,6 +108,16 @@ contains
     real(jprb), dimension(config%n_g_lw, nlev+1) :: flux_up, flux_dn
     real(jprb), dimension(config%n_g_lw, nlev+1) :: flux_up_clear, flux_dn_clear
 
+#ifdef OIFS_CUDA_RADIATION
+    real(jprb), allocatable, dimension(:,:,:) :: od_scaling_batch
+    real(jprb), allocatable, dimension(:) :: total_cloud_cover_batch
+    real(jprb), allocatable, dimension(:,:) :: gpu_lw_up_clear, gpu_lw_dn_clear
+    real(jprb), allocatable, dimension(:,:) :: gpu_lw_up, gpu_lw_dn
+    real(jprb), allocatable, dimension(:,:) :: gpu_lw_dn_surf_clear_g
+    real(jprb), allocatable, dimension(:,:) :: gpu_lw_dn_surf_g
+    real(jprb), allocatable, dimension(:,:) :: gpu_lw_derivatives
+#endif
+
     ! Combined gas+aerosol+cloud optical depth, single scattering
     ! albedo and asymmetry factor
     real(jprb), dimension(config%n_g_lw) :: od_total, ssa_total, g_total
@@ -125,6 +148,13 @@ contains
     ! Loop indices for level and column
     integer :: jlev, jcol
 
+#ifdef OIFS_CUDA_RADIATION
+    logical :: use_gpu_lw, validate_gpu_lw
+    character(len=32) :: gpu_radiation_env, gpu_min_columns_env, gpu_validate_env
+    integer :: gpu_min_columns, gpu_status, env_read_status
+    real(jprb) :: gpu_error_ratio
+#endif
+
     real(jphook) :: hook_handle
 
     if (lhook) call dr_hook('radiation_mcica_lw:solver_mcica_lw',0,hook_handle)
@@ -135,6 +165,81 @@ contains
     end if
 
     ng = config%n_g_lw
+
+#ifdef OIFS_CUDA_RADIATION
+!$omp critical(oifs_cuda_radiation_env)
+    if (.not. gpu_options_initialized) then
+      gpu_radiation_env = ''
+      call get_environment_variable('OIFS_GPU_RADIATION',gpu_radiation_env)
+      gpu_enabled_option = trim(gpu_radiation_env) == '1'
+      gpu_validate_env = ''
+      call get_environment_variable('OIFS_GPU_VALIDATE',gpu_validate_env)
+      gpu_validate_option = trim(gpu_validate_env) == '1'
+      gpu_min_columns_option = 256
+      gpu_min_columns_env = ''
+      call get_environment_variable('OIFS_GPU_MIN_COLUMNS',gpu_min_columns_env)
+      if (len_trim(gpu_min_columns_env) > 0) then
+        read(gpu_min_columns_env,*,iostat=env_read_status) gpu_min_columns
+        if (env_read_status == 0) gpu_min_columns_option = max(1,gpu_min_columns)
+      end if
+      if (gpu_enabled_option) then
+        gpu_available_option = cuda_radiation_available()
+        if (.not. gpu_available_option) write(nulerr,'(a)') &
+             & '*** CUDA longwave radiation unavailable; using the CPU solver'
+      end if
+      gpu_options_initialized = .true.
+    end if
+    use_gpu_lw = gpu_enabled_option .and. gpu_available_option
+    validate_gpu_lw = gpu_validate_option
+    gpu_min_columns = gpu_min_columns_option
+!$omp end critical(oifs_cuda_radiation_env)
+    use_gpu_lw = use_gpu_lw .and. iendcol-istartcol+1 >= max(1,gpu_min_columns)
+
+    if (use_gpu_lw) then
+      allocate(od_scaling_batch(ng,nlev,istartcol:iendcol), &
+           & total_cloud_cover_batch(istartcol:iendcol), &
+           & gpu_lw_up_clear(istartcol:iendcol,nlev+1), &
+           & gpu_lw_dn_clear(istartcol:iendcol,nlev+1), &
+           & gpu_lw_up(istartcol:iendcol,nlev+1), &
+           & gpu_lw_dn(istartcol:iendcol,nlev+1), &
+           & gpu_lw_dn_surf_clear_g(ng,istartcol:iendcol), &
+           & gpu_lw_dn_surf_g(ng,istartcol:iendcol), &
+           & gpu_lw_derivatives(istartcol:iendcol,nlev+1))
+      do jcol = istartcol,iendcol
+        call cloud_generator(ng,nlev,config%i_overlap_scheme, &
+             & single_level%iseed(jcol)+997,config%cloud_fraction_threshold, &
+             & cloud%fraction(jcol,:),cloud%overlap_param(jcol,:), &
+             & config%cloud_inhom_decorr_scaling,cloud%fractional_std(jcol,:), &
+             & config%pdf_sampler,od_scaling_batch(:,:,jcol), &
+             & total_cloud_cover_batch(jcol),is_beta_overlap=config%use_beta_overlap)
+      end do
+      gpu_status = cuda_lw_compute(ng,config%n_bands_lw,nlev,iendcol-istartcol+1, &
+           & config%do_lw_aerosol_scattering,config%do_lw_cloud_scattering, &
+           & config%do_lw_derivatives,od,ssa,g,planck_hl,emission,albedo, &
+           & config%i_band_from_reordered_g_lw,config%cloud_fraction_threshold, &
+           & cloud%fraction(istartcol:iendcol,:),total_cloud_cover_batch, &
+           & od_scaling_batch,od_cloud,ssa_cloud,g_cloud,gpu_lw_up_clear, &
+           & gpu_lw_dn_clear,gpu_lw_up,gpu_lw_dn,gpu_lw_dn_surf_clear_g, &
+           & gpu_lw_dn_surf_g,gpu_lw_derivatives)
+      if (gpu_status /= 0) then
+        write(nulerr,'(a,i0)') '*** CUDA longwave radiation failed with status ',gpu_status
+        call radiation_abort()
+      end if
+      if (.not. validate_gpu_lw) then
+        flux%lw_up_clear(istartcol:iendcol,:) = gpu_lw_up_clear
+        flux%lw_dn_clear(istartcol:iendcol,:) = gpu_lw_dn_clear
+        flux%lw_up(istartcol:iendcol,:) = gpu_lw_up
+        flux%lw_dn(istartcol:iendcol,:) = gpu_lw_dn
+        flux%lw_dn_surf_clear_g(:,istartcol:iendcol) = gpu_lw_dn_surf_clear_g
+        flux%lw_dn_surf_g(:,istartcol:iendcol) = gpu_lw_dn_surf_g
+        flux%cloud_cover_lw(istartcol:iendcol) = total_cloud_cover_batch
+        if (config%do_lw_derivatives) &
+             & flux%lw_derivatives(istartcol:iendcol,:) = gpu_lw_derivatives
+        if (lhook) call dr_hook('radiation_mcica_lw:solver_mcica_lw',1,hook_handle)
+        return
+      end if
+    end if
+#endif
 
     ! Loop through columns
     do jcol = istartcol,iendcol
@@ -334,6 +439,62 @@ contains
         end if
       end if ! Cloud is present in profile
     end do
+
+#ifdef OIFS_CUDA_RADIATION
+    if (use_gpu_lw .and. validate_gpu_lw) then
+      gpu_error_ratio = 0.0_jprb
+      gpu_error_ratio = max(gpu_error_ratio,maxval(abs(flux%lw_up_clear(istartcol:iendcol,:)-gpu_lw_up_clear) &
+           & / (1.0e-5_jprb + 2.0e-12_jprb*max(abs(flux%lw_up_clear(istartcol:iendcol,:)),abs(gpu_lw_up_clear)))))
+      gpu_error_ratio = max(gpu_error_ratio,maxval(abs(flux%lw_dn_clear(istartcol:iendcol,:)-gpu_lw_dn_clear) &
+           & / (1.0e-5_jprb + 2.0e-12_jprb*max(abs(flux%lw_dn_clear(istartcol:iendcol,:)),abs(gpu_lw_dn_clear)))))
+      gpu_error_ratio = max(gpu_error_ratio,maxval(abs(flux%lw_up(istartcol:iendcol,:)-gpu_lw_up) &
+           & / (1.0e-5_jprb + 2.0e-12_jprb*max(abs(flux%lw_up(istartcol:iendcol,:)),abs(gpu_lw_up)))))
+      gpu_error_ratio = max(gpu_error_ratio,maxval(abs(flux%lw_dn(istartcol:iendcol,:)-gpu_lw_dn) &
+           & / (1.0e-5_jprb + 2.0e-12_jprb*max(abs(flux%lw_dn(istartcol:iendcol,:)),abs(gpu_lw_dn)))))
+      gpu_error_ratio = max(gpu_error_ratio,maxval(abs(flux%lw_dn_surf_clear_g(:,istartcol:iendcol) &
+           & -gpu_lw_dn_surf_clear_g) / (1.0e-5_jprb + 2.0e-12_jprb &
+           & *max(abs(flux%lw_dn_surf_clear_g(:,istartcol:iendcol)),abs(gpu_lw_dn_surf_clear_g)))))
+      gpu_error_ratio = max(gpu_error_ratio,maxval(abs(flux%lw_dn_surf_g(:,istartcol:iendcol) &
+           & -gpu_lw_dn_surf_g) / (1.0e-5_jprb + 2.0e-12_jprb &
+           & *max(abs(flux%lw_dn_surf_g(:,istartcol:iendcol)),abs(gpu_lw_dn_surf_g)))))
+      gpu_error_ratio = max(gpu_error_ratio,maxval(abs(flux%cloud_cover_lw(istartcol:iendcol)-total_cloud_cover_batch) &
+           & / (5.0e-13_jprb + 2.0e-12_jprb*max(abs(flux%cloud_cover_lw(istartcol:iendcol)), &
+           & abs(total_cloud_cover_batch)))))
+      if (config%do_lw_derivatives) then
+        gpu_error_ratio = max(gpu_error_ratio,maxval(abs(flux%lw_derivatives(istartcol:iendcol,:)-gpu_lw_derivatives) &
+             & / (1.0e-9_jprb + 2.0e-12_jprb*max(abs(flux%lw_derivatives(istartcol:iendcol,:)), &
+             & abs(gpu_lw_derivatives)))))
+      end if
+      if (gpu_error_ratio > 1.0_jprb) then
+        write(nulerr,'(a,es12.4)') '*** CUDA longwave validation failed; normalized max error = ',gpu_error_ratio
+        write(nulerr,'(a,es12.4)') '    lw_up_clear max abs = ', &
+             & maxval(abs(flux%lw_up_clear(istartcol:iendcol,:)-gpu_lw_up_clear))
+        write(nulerr,'(a,es12.4)') '    lw_dn_clear max abs = ', &
+             & maxval(abs(flux%lw_dn_clear(istartcol:iendcol,:)-gpu_lw_dn_clear))
+        write(nulerr,'(a,es12.4)') '    lw_up max abs = ', &
+             & maxval(abs(flux%lw_up(istartcol:iendcol,:)-gpu_lw_up))
+        write(nulerr,'(a,es12.4)') '    lw_dn max abs = ', &
+             & maxval(abs(flux%lw_dn(istartcol:iendcol,:)-gpu_lw_dn))
+        write(nulerr,'(a,es12.4)') '    lw_dn_surf_clear_g max abs = ', &
+             & maxval(abs(flux%lw_dn_surf_clear_g(:,istartcol:iendcol)-gpu_lw_dn_surf_clear_g))
+        write(nulerr,'(a,es12.4)') '    lw_dn_surf_g max abs = ', &
+             & maxval(abs(flux%lw_dn_surf_g(:,istartcol:iendcol)-gpu_lw_dn_surf_g))
+        if (config%do_lw_derivatives) write(nulerr,'(a,es12.4)') &
+             & '    lw_derivatives max abs = ', &
+             & maxval(abs(flux%lw_derivatives(istartcol:iendcol,:)-gpu_lw_derivatives))
+        call radiation_abort()
+      end if
+      flux%lw_up_clear(istartcol:iendcol,:) = gpu_lw_up_clear
+      flux%lw_dn_clear(istartcol:iendcol,:) = gpu_lw_dn_clear
+      flux%lw_up(istartcol:iendcol,:) = gpu_lw_up
+      flux%lw_dn(istartcol:iendcol,:) = gpu_lw_dn
+      flux%lw_dn_surf_clear_g(:,istartcol:iendcol) = gpu_lw_dn_surf_clear_g
+      flux%lw_dn_surf_g(:,istartcol:iendcol) = gpu_lw_dn_surf_g
+      flux%cloud_cover_lw(istartcol:iendcol) = total_cloud_cover_batch
+      if (config%do_lw_derivatives) &
+           & flux%lw_derivatives(istartcol:iendcol,:) = gpu_lw_derivatives
+    end if
+#endif
 
     if (lhook) call dr_hook('radiation_mcica_lw:solver_mcica_lw',1,hook_handle)
     

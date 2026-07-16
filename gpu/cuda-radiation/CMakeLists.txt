@@ -22,5 +22,8 @@ target_compile_options(oifs_cuda_radiation PRIVATE
 
 add_executable(oifs_cuda_radiation_test test_cuda_radiation.cu)
 target_link_libraries(oifs_cuda_radiation_test PRIVATE oifs_cuda_radiation)
+add_executable(oifs_cuda_longwave_test test_cuda_longwave.cu)
+target_link_libraries(oifs_cuda_longwave_test PRIVATE oifs_cuda_radiation)
 enable_testing()
 add_test(NAME oifs_cuda_radiation_test COMMAND oifs_cuda_radiation_test)
+add_test(NAME oifs_cuda_longwave_test COMMAND oifs_cuda_longwave_test)

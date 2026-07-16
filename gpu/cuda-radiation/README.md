@@ -1,13 +1,15 @@
-# CUDA shortwave radiation
+# CUDA shortwave and longwave radiation
 
 This optional backend accelerates the double-precision ecRad McICA shortwave
-solver used by OpenIFS. The CUDA code is deliberately built as a sidecar so
-that the main OpenIFS Fortran build does not need a CUDA-aware compiler.
+and longwave solvers used by OpenIFS. The CUDA code is deliberately built as
+a sidecar so that the main OpenIFS Fortran build does not need a CUDA-aware
+compiler.
 
 The backend offloads optical-property calculation, the vertical adding
-solver, clear/cloud blending, and broadband reduction. Only the six profile
-fields and four spectral surface fields consumed by OpenIFS are copied back;
-the much larger per-g-point flux profiles remain on the GPU.
+solver, clear/cloud blending, and broadband reduction. The longwave path also
+computes the optional surface-temperature flux derivatives on the GPU. Only
+the profile and surface fields consumed by OpenIFS are copied back; the much
+larger per-g-point flux profiles remain on the GPU.
 
 ## Build and test
 
@@ -21,9 +23,10 @@ cmake --build build-gpu/cuda-radiation -j
 ctest --test-dir build-gpu/cuda-radiation --output-on-failure
 ```
 
-The parity test exercises delta scaling on and off, cloudy and clear layers,
-day and night columns, and every field returned to OpenIFS against an
-independent CPU implementation.
+The parity tests compare every field returned to OpenIFS against independent
+CPU implementations. Shortwave coverage includes delta scaling on and off,
+cloudy and clear layers, and day and night columns. Longwave coverage includes
+all four aerosol/cloud scattering combinations and flux derivatives.
 
 Configure OpenIFS with the loader library, using the normal host compiler:
 
@@ -59,11 +62,11 @@ Optional controls are:
 Validation mode is intended for short acceptance forecasts, not production,
 because it deliberately performs the work twice.
 
-The backend currently supports only the double-precision McICA shortwave
-path. Longwave radiation, single-precision OpenIFS, and other shortwave
-solvers continue to use their existing CPU implementations.
+The backend currently supports the double-precision McICA shortwave and
+longwave paths. Single-precision OpenIFS and other radiation solvers continue
+to use their existing CPU implementations.
 
-## GH200 smoke-test result
+## GH200 results
 
 On the bundled two-rank T21 six-hour forecast, with both paths using
 `NRPROMA=512`, production GPU mode reduced wall time from 3.96 s to 3.50 s
@@ -73,7 +76,21 @@ model overhead, so these numbers are an integration smoke test rather than a
 scaling claim; representative operational resolutions should be benchmarked
 before choosing production batch and rank-to-device settings.
 
-Full OpenIFS validation found a maximum CPU/GPU absolute difference of
-`5.91e-9` in diffuse flux after the vertical adding recurrence, while direct
-flux agreed within `2.28e-13`. Validation mode uses a `1e-8` absolute plus
-`2e-12` relative tolerance.
+Full OpenIFS shortwave validation found a maximum CPU/GPU absolute difference
+of `5.91e-9` in diffuse flux after the vertical adding recurrence, while direct
+flux agreed within `2.28e-13`. Longwave validation found a maximum flux
+difference of `7.18e-6 W m-2` and a maximum surface-temperature derivative
+difference of `5.58e-10 W m-2 K-1`. These are rounding-level differences from
+the different parallel reduction order. Validation uses a `1e-8` shortwave
+tolerance, a `1e-5 W m-2` longwave flux tolerance, and a `1e-9 W m-2 K-1`
+longwave derivative tolerance, each with an additional `2e-12` relative
+tolerance.
+
+The README `ab7z` T159/L91 144-hour forecast was run with four MPI ranks,
+one CPU thread per rank, and all ranks sharing one GH200. DrHook model wall
+time was `556.85 s` on CPU, `523.29 s` with shortwave offload, and `507.49 s`
+with shortwave and longwave offload. The complete radiation port therefore
+reduced model wall time by 8.9% relative to CPU (1.097x throughput); adding
+longwave reduced a further 3.0% relative to the shortwave-only backend. The
+longwave solver itself fell from `43.20 s` to `27.47 s`, a 36.4% reduction
+(1.57x speedup).
