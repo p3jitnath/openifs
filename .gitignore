@@ -1,6 +1,7 @@
 # Ignore the OpenIFS build/source/install directories and any log files
 /source/
 /build/
+/build-gpu/
 /install/
 /*.log
 

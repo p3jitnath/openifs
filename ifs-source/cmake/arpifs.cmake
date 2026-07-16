@@ -73,6 +73,14 @@ list(APPEND arpifs_private_includes satrad/interface openifs/emos)
 
 list(APPEND arpifs_public_libs wam.${PREC})
 
+if(PREC STREQUAL "DP" AND OIFS_CUDA_RADIATION_LOADER)
+  if(NOT EXISTS "${OIFS_CUDA_RADIATION_LOADER}")
+    message(FATAL_ERROR "OIFS_CUDA_RADIATION_LOADER does not exist: ${OIFS_CUDA_RADIATION_LOADER}")
+  endif()
+  list(APPEND arpifs_private_libs "${OIFS_CUDA_RADIATION_LOADER}")
+  list(APPEND IFS_DEFINITIONS OIFS_CUDA_RADIATION)
+endif()
+
 # Add the openifs "smart" dummies, which are built in arpifs, rather than 
   # dummy to ensure consistent generation of fortran interface blocks, when 
   # compared to the full build. 

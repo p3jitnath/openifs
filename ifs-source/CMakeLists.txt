@@ -15,6 +15,8 @@ find_package( ecbuild 3.1 REQUIRED )
 option(IFS_CHECK_BOUNDS "Enable bounds checking" OFF)
 option(IFS_INIT_SNAN "Initialize REALs with signaling NaNs" OFF)
 option(IFS_SHARED_LIBS "Build shared libraries (overrides BUILD_SHARED_LIBS)" ON)
+set(OIFS_CUDA_RADIATION_LOADER "" CACHE FILEPATH
+    "CUDA radiation bridge library built independently with nvcc")
 
 set(BUILD_SHARED_LIBS ${IFS_SHARED_LIBS})
 
