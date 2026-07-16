@@ -56,8 +56,8 @@ Optional controls are:
 - `OIFS_GPU_NPROMA`: automatic radiation batch size; default `512`.
 - `OIFS_GPU_MIN_COLUMNS`: do not offload smaller calls; default `256`.
 - `OIFS_GPU_CLOUD=1`: enable the experimental CUDA McICA cloud generator.
-  It is disabled by default because the current serial-per-column RNG kernel
-  is slower when several MPI ranks share one GPU.
+  It remains disabled by default because performance depends on radiation
+  batch size and the number of MPI ranks sharing each GPU.
 - `OIFS_CUDA_DEVICE`: zero-based CUDA device index; default `0`.
 - `OIFS_GPU_VALIDATE=1`: calculate both CPU and GPU results, compare every
   returned field, abort on a mismatch, then continue with the GPU result.
@@ -78,6 +78,15 @@ too small to saturate a GH200 and is dominated by cloud generation and fixed
 model overhead, so these numbers are an integration smoke test rather than a
 scaling claim; representative operational resolutions should be benchmarked
 before choosing production batch and rank-to-device settings.
+
+On the bundled 24-hour `ab7z` 3D experiment with four MPI ranks sharing one
+GH200 and `OIFS_GPU_NPROMA=2048`, enabling the CUDA cloud generator reduced
+the sum of the 25 reported model-step times from 83.014 s (CUDA SW+LW) to
+82.113 s (CUDA SW+LW+cloud), a 1.09% end-to-end gain. The optimized path keeps
+separate shortwave and longwave cloud workspaces and consumes cloud scaling
+directly on the device, avoiding repeated CUDA allocation and a device-host-
+device round trip. At smaller batch sizes the cloud kernel may still lose to
+CPU generation, so `OIFS_GPU_NPROMA` should be tuned for the target layout.
 
 Full OpenIFS shortwave validation found a maximum CPU/GPU absolute difference
 of `5.91e-9` in diffuse flux after the vertical adding recurrence, while direct

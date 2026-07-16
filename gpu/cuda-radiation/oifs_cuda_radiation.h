@@ -39,6 +39,7 @@ int oifs_cuda_lw_compute_dp(
 
 int oifs_cuda_cloud_compute_dp(
     int ng, int nlev, int ncol, int overlap_scheme, int is_beta_overlap,
+    int device_handoff,
     const int* seeds, const double* active, double frac_threshold,
     const double* cloud_fraction, const double* overlap_parameter,
     double decorrelation_scaling, const double* fractional_std,

@@ -91,7 +91,8 @@ struct CloudWorkspace {
   std::uint32_t* random_state = nullptr;
 };
 
-CloudWorkspace cloud_workspace;
+CloudWorkspace cloud_workspaces[2];
+CloudWorkspace* ready_cloud_workspace = nullptr;
 std::mutex workspace_mutex;
 std::string last_error;
 int selected_device = -1;
@@ -162,7 +163,8 @@ void release_longwave_workspace() {
   longwave_workspace = LongwaveWorkspace{};
 }
 
-void release_cloud_workspace() {
+void release_cloud_workspace(CloudWorkspace& cloud_workspace) {
+  if (ready_cloud_workspace == &cloud_workspace) ready_cloud_workspace = nullptr;
 #define FREE_CLOUD(member) free_ptr(cloud_workspace.member)
   FREE_CLOUD(seeds); FREE_CLOUD(active); FREE_CLOUD(cloud_fraction);
   FREE_CLOUD(overlap_parameter); FREE_CLOUD(fractional_std);
@@ -174,6 +176,11 @@ void release_cloud_workspace() {
 #undef FREE_CLOUD
   if (cloud_workspace.stream) cudaStreamDestroy(cloud_workspace.stream);
   cloud_workspace = CloudWorkspace{};
+}
+
+void release_cloud_workspaces() {
+  release_cloud_workspace(cloud_workspaces[0]);
+  release_cloud_workspace(cloud_workspaces[1]);
 }
 
 bool cuda_ok(cudaError_t status, const char* operation) {
@@ -316,12 +323,27 @@ bool ensure_longwave_workspace(int ng, int nbands, int nlev, int ncol) {
 }
 
 bool ensure_cloud_workspace(
-    int ng, int nlev, int ncol, int pdf_ncdf, int pdf_nfsd) {
-  if (cloud_workspace.ng == ng && cloud_workspace.nlev == nlev &&
-      cloud_workspace.ncol >= ncol && cloud_workspace.pdf_ncdf == pdf_ncdf &&
-      cloud_workspace.pdf_nfsd == pdf_nfsd) return true;
+    int ng, int nlev, int ncol, int pdf_ncdf, int pdf_nfsd,
+    CloudWorkspace*& selected) {
+  for (auto& candidate : cloud_workspaces) {
+    if (candidate.ng == ng && candidate.nlev == nlev &&
+        candidate.ncol >= ncol && candidate.pdf_ncdf == pdf_ncdf &&
+        candidate.pdf_nfsd == pdf_nfsd) {
+      selected = &candidate;
+      return true;
+    }
+  }
 
-  release_cloud_workspace();
+  selected = nullptr;
+  for (auto& candidate : cloud_workspaces) {
+    if (!candidate.stream) {
+      selected = &candidate;
+      break;
+    }
+  }
+  if (!selected) selected = &cloud_workspaces[0];
+  release_cloud_workspace(*selected);
+  auto& cloud_workspace = *selected;
   cloud_workspace.ng = ng;
   cloud_workspace.nlev = nlev;
   cloud_workspace.ncol = ncol;
@@ -336,13 +358,13 @@ bool ensure_cloud_workspace(
 
   if (!cuda_ok(cudaStreamCreateWithFlags(&cloud_workspace.stream, cudaStreamNonBlocking),
                "cudaStreamCreate(cloud)")) {
-    release_cloud_workspace();
+    release_cloud_workspace(cloud_workspace);
     return false;
   }
 #define ALLOCATE_CLOUD(member, count)                                             \
   do {                                                                            \
     if (!allocate(cloud_workspace.member, count, "cudaMalloc(cloud " #member ")")) { \
-      release_cloud_workspace();                                                  \
+      release_cloud_workspace(cloud_workspace);                                   \
       return false;                                                               \
     }                                                                             \
   } while (false)
@@ -1067,14 +1089,16 @@ bool copy_from_longwave_device(void* dst, const void* src, std::size_t bytes, co
                                  longwave_workspace.stream), name);
 }
 
-bool copy_to_cloud_device(void* dst, const void* src, std::size_t bytes, const char* name) {
+bool copy_to_cloud_device(void* dst, const void* src, std::size_t bytes,
+                          cudaStream_t stream, const char* name) {
   return cuda_ok(cudaMemcpyAsync(dst, src, bytes, cudaMemcpyHostToDevice,
-                                 cloud_workspace.stream), name);
+                                 stream), name);
 }
 
-bool copy_from_cloud_device(void* dst, const void* src, std::size_t bytes, const char* name) {
+bool copy_from_cloud_device(void* dst, const void* src, std::size_t bytes,
+                            cudaStream_t stream, const char* name) {
   return cuda_ok(cudaMemcpyAsync(dst, src, bytes, cudaMemcpyDeviceToHost,
-                                 cloud_workspace.stream), name);
+                                 stream), name);
 }
 
 }  // namespace
@@ -1110,14 +1134,24 @@ extern "C" int oifs_cuda_sw_compute_dp(
   const std::size_t cloud_layer = static_cast<std::size_t>(nbands) * nlev * ncol;
   const std::size_t fraction = static_cast<std::size_t>(ncol) * nlev;
   const std::size_t profile = static_cast<std::size_t>(ncol) * (nlev + 1);
+  CloudWorkspace* cloud = ready_cloud_workspace;
+  const bool use_device_cloud = cloud && cloud->ng == ng &&
+      cloud->nlev == nlev && cloud->ncol >= ncol;
+  const double* device_od_scaling = use_device_cloud ? cloud->od_scaling
+                                                     : workspace.od_scaling;
+  const double* device_cloud_cover = use_device_cloud ? cloud->total_cloud_cover
+                                                      : workspace.total_cloud_cover;
+  ready_cloud_workspace = nullptr;
 #define COPY_IN(member, src, count) if (!copy_to_device(workspace.member, src, (count) * sizeof(*(src)), "copy " #member)) return 3
   COPY_IN(mu0, mu0, ncol);
   COPY_IN(od, od, layer); COPY_IN(ssa, ssa, layer); COPY_IN(asymmetry, asymmetry, layer);
   COPY_IN(albedo_direct, albedo_direct, gpcol); COPY_IN(albedo_diffuse, albedo_diffuse, gpcol);
   COPY_IN(incoming_sw, incoming_sw, gpcol); COPY_IN(band_from_g, band_from_g, ng);
   COPY_IN(cloud_fraction, cloud_fraction, fraction);
-  COPY_IN(total_cloud_cover, total_cloud_cover, ncol);
-  COPY_IN(od_scaling, od_scaling, layer);
+  if (!use_device_cloud) {
+    COPY_IN(total_cloud_cover, total_cloud_cover, ncol);
+    COPY_IN(od_scaling, od_scaling, layer);
+  }
   COPY_IN(od_cloud, od_cloud, cloud_layer); COPY_IN(ssa_cloud, ssa_cloud, cloud_layer);
   COPY_IN(asymmetry_cloud, asymmetry_cloud, cloud_layer);
 #undef COPY_IN
@@ -1128,7 +1162,7 @@ extern "C" int oifs_cuda_sw_compute_dp(
   optics_kernel<<<optics_blocks, block_size, 0, workspace.stream>>>(
       ng, nbands, nlev, ncol, false, do_delta_scaling != 0, cloud_fraction_threshold,
       workspace.mu0, workspace.od, workspace.ssa, workspace.asymmetry,
-      workspace.band_from_g, workspace.cloud_fraction, workspace.od_scaling,
+      workspace.band_from_g, workspace.cloud_fraction, device_od_scaling,
       workspace.od_cloud, workspace.ssa_cloud, workspace.asymmetry_cloud,
       workspace.ref_diff, workspace.trans_diff, workspace.ref_dir,
       workspace.trans_dir_diff, workspace.trans_dir_dir);
@@ -1142,7 +1176,7 @@ extern "C" int oifs_cuda_sw_compute_dp(
   optics_kernel<<<optics_blocks, block_size, 0, workspace.stream>>>(
       ng, nbands, nlev, ncol, true, do_delta_scaling != 0, cloud_fraction_threshold,
       workspace.mu0, workspace.od, workspace.ssa, workspace.asymmetry,
-      workspace.band_from_g, workspace.cloud_fraction, workspace.od_scaling,
+      workspace.band_from_g, workspace.cloud_fraction, device_od_scaling,
       workspace.od_cloud, workspace.ssa_cloud, workspace.asymmetry_cloud,
       workspace.ref_diff, workspace.trans_diff, workspace.ref_dir,
       workspace.trans_dir_diff, workspace.trans_dir_dir);
@@ -1154,14 +1188,14 @@ extern "C" int oifs_cuda_sw_compute_dp(
       workspace.inv_denominator, workspace.flux_up_cloud,
       workspace.flux_dn_diffuse_cloud, workspace.flux_dn_direct_cloud);
   reduce_profiles_kernel<<<profile_blocks, block_size, 0, workspace.stream>>>(
-      ng, nlev, ncol, workspace.total_cloud_cover, workspace.flux_up,
+      ng, nlev, ncol, device_cloud_cover, workspace.flux_up,
       workspace.flux_dn_diffuse, workspace.flux_dn_direct,
       workspace.flux_up_cloud, workspace.flux_dn_diffuse_cloud,
       workspace.flux_dn_direct_cloud, workspace.sw_up_clear,
       workspace.sw_dn_clear, workspace.sw_dn_direct_clear, workspace.sw_up,
       workspace.sw_dn, workspace.sw_dn_direct);
   reduce_surface_kernel<<<adding_blocks, block_size, 0, workspace.stream>>>(
-      ng, nlev, ncol, workspace.total_cloud_cover, workspace.flux_dn_diffuse,
+      ng, nlev, ncol, device_cloud_cover, workspace.flux_dn_diffuse,
       workspace.flux_dn_direct, workspace.flux_dn_diffuse_cloud,
       workspace.flux_dn_direct_cloud, workspace.sw_dn_diffuse_surf_clear_g,
       workspace.sw_dn_direct_surf_clear_g, workspace.sw_dn_diffuse_surf_g,
@@ -1210,6 +1244,14 @@ extern "C" int oifs_cuda_lw_compute_dp(
   const std::size_t cloud_layer = static_cast<std::size_t>(nbands) * nlev * ncol;
   const std::size_t fraction = static_cast<std::size_t>(ncol) * nlev;
   const std::size_t profile = static_cast<std::size_t>(ncol) * (nlev + 1);
+  CloudWorkspace* cloud = ready_cloud_workspace;
+  const bool use_device_cloud = cloud && cloud->ng == ng &&
+      cloud->nlev == nlev && cloud->ncol >= ncol;
+  const double* device_od_scaling = use_device_cloud ? cloud->od_scaling
+                                                     : lw.od_scaling;
+  const double* device_cloud_cover = use_device_cloud ? cloud->total_cloud_cover
+                                                      : lw.total_cloud_cover;
+  ready_cloud_workspace = nullptr;
 #define COPY_LW_IN(member, src, count)                                            \
   if (!copy_to_longwave_device(lw.member, src, (count) * sizeof(*(src)),          \
                                "copy lw " #member)) return 3
@@ -1223,8 +1265,10 @@ extern "C" int oifs_cuda_lw_compute_dp(
   COPY_LW_IN(albedo_surface, albedo, gpcol);
   COPY_LW_IN(band_from_g, band_from_g, ng);
   COPY_LW_IN(cloud_fraction, cloud_fraction, fraction);
-  COPY_LW_IN(total_cloud_cover, total_cloud_cover, ncol);
-  COPY_LW_IN(od_scaling, od_scaling, layer);
+  if (!use_device_cloud) {
+    COPY_LW_IN(total_cloud_cover, total_cloud_cover, ncol);
+    COPY_LW_IN(od_scaling, od_scaling, layer);
+  }
   COPY_LW_IN(od_cloud, od_cloud, cloud_layer);
   if (do_cloud_scattering) {
     COPY_LW_IN(ssa_cloud, ssa_cloud, cloud_layer);
@@ -1241,7 +1285,7 @@ extern "C" int oifs_cuda_lw_compute_dp(
       ng, nbands, nlev, ncol, false, do_aerosol_scattering != 0,
       do_cloud_scattering != 0, cloud_fraction_threshold, lw.od, lw.ssa,
       lw.asymmetry, lw.planck_hl, lw.band_from_g, lw.cloud_fraction,
-      lw.od_scaling, lw.od_cloud, lw.ssa_cloud, lw.asymmetry_cloud,
+      device_od_scaling, lw.od_cloud, lw.ssa_cloud, lw.asymmetry_cloud,
       lw.ref_clear, lw.trans_clear, lw.source_up_clear, lw.source_dn_clear);
   longwave_adding_kernel<<<column_blocks, block_size, 0, lw.stream>>>(
       ng, nlev, ncol, do_aerosol_scattering != 0, lw.ref_clear, lw.trans_clear,
@@ -1251,7 +1295,7 @@ extern "C" int oifs_cuda_lw_compute_dp(
       ng, nbands, nlev, ncol, true, do_aerosol_scattering != 0,
       do_cloud_scattering != 0, cloud_fraction_threshold, lw.od, lw.ssa,
       lw.asymmetry, lw.planck_hl, lw.band_from_g, lw.cloud_fraction,
-      lw.od_scaling, lw.od_cloud, lw.ssa_cloud, lw.asymmetry_cloud,
+      device_od_scaling, lw.od_cloud, lw.ssa_cloud, lw.asymmetry_cloud,
       lw.ref_cloud, lw.trans_cloud, lw.source_up_cloud, lw.source_dn_cloud);
   longwave_adding_kernel<<<column_blocks, block_size, 0, lw.stream>>>(
       ng, nlev, ncol, (do_aerosol_scattering || do_cloud_scattering) != 0,
@@ -1259,16 +1303,16 @@ extern "C" int oifs_cuda_lw_compute_dp(
       lw.emission, lw.albedo_surface, lw.albedo, lw.source, lw.inv_denominator,
       lw.flux_up_cloud, lw.flux_dn_cloud);
   reduce_longwave_kernel<<<profile_blocks, block_size, 0, lw.stream>>>(
-      ng, nlev, ncol, cloud_fraction_threshold, lw.total_cloud_cover,
+      ng, nlev, ncol, cloud_fraction_threshold, device_cloud_cover,
       lw.flux_up_clear, lw.flux_dn_clear, lw.flux_up_cloud, lw.flux_dn_cloud,
       lw.lw_up_clear, lw.lw_dn_clear, lw.lw_up, lw.lw_dn);
   reduce_longwave_surface_kernel<<<column_blocks, block_size, 0, lw.stream>>>(
-      ng, nlev, ncol, cloud_fraction_threshold, lw.total_cloud_cover,
+      ng, nlev, ncol, cloud_fraction_threshold, device_cloud_cover,
       lw.flux_dn_clear, lw.flux_dn_cloud, lw.lw_dn_surf_clear_g,
       lw.lw_dn_surf_g);
   if (do_derivatives) {
     longwave_derivatives_kernel<<<derivative_blocks, block_size, 0, lw.stream>>>(
-        ng, nlev, ncol, cloud_fraction_threshold, lw.total_cloud_cover,
+        ng, nlev, ncol, cloud_fraction_threshold, device_cloud_cover,
         lw.trans_clear, lw.trans_cloud, lw.flux_up_clear, lw.flux_up_cloud,
         lw.derivative_g, lw.lw_derivatives);
   } else {
@@ -1292,6 +1336,7 @@ extern "C" int oifs_cuda_lw_compute_dp(
 
 extern "C" int oifs_cuda_cloud_compute_dp(
     int ng, int nlev, int ncol, int overlap_scheme, int is_beta_overlap,
+    int device_handoff,
     const int* seeds, const double* active, double frac_threshold,
     const double* cloud_fraction, const double* overlap_parameter,
     double decorrelation_scaling, const double* fractional_std,
@@ -1300,6 +1345,7 @@ extern "C" int oifs_cuda_cloud_compute_dp(
     double* od_scaling, double* total_cloud_cover) {
   std::lock_guard<std::mutex> lock(workspace_mutex);
   last_error.clear();
+  ready_cloud_workspace = nullptr;
   if (ng <= 0 || nlev <= 1 || ncol <= 0 || pdf_ncdf < 2 || pdf_nfsd < 2) {
     last_error = "invalid cloud-generator dimensions";
     return 1;
@@ -1309,15 +1355,17 @@ extern "C" int oifs_cuda_cloud_compute_dp(
     return 7;
   }
   if (!select_device()) return 2;
-  if (!ensure_cloud_workspace(ng, nlev, ncol, pdf_ncdf, pdf_nfsd)) return 2;
-  auto& cloud = cloud_workspace;
+  CloudWorkspace* selected_cloud = nullptr;
+  if (!ensure_cloud_workspace(ng, nlev, ncol, pdf_ncdf, pdf_nfsd,
+                              selected_cloud)) return 2;
+  auto& cloud = *selected_cloud;
   const std::size_t profile = static_cast<std::size_t>(ncol) * nlev;
   const std::size_t interfaces = static_cast<std::size_t>(ncol) * (nlev - 1);
   const std::size_t scaling = static_cast<std::size_t>(ng) * nlev * ncol;
   const std::size_t pdf_size = static_cast<std::size_t>(pdf_ncdf) * pdf_nfsd;
 #define COPY_CLOUD_IN(member, src, count)                                        \
   if (!copy_to_cloud_device(cloud.member, src, (count) * sizeof(*(src)),          \
-                            "copy cloud " #member)) return 3
+                            cloud.stream, "copy cloud " #member)) return 3
   COPY_CLOUD_IN(seeds, seeds, ncol);
   COPY_CLOUD_IN(active, active, ncol);
   COPY_CLOUD_IN(cloud_fraction, cloud_fraction, profile);
@@ -1337,11 +1385,15 @@ extern "C" int oifs_cuda_cloud_compute_dp(
       cloud.random_cloud, cloud.random_inhom1, cloud.random_inhom2,
       cloud.random_state);
   if (!cuda_ok(cudaGetLastError(), "cloud-generator kernel launch")) return 4;
-  if (!copy_from_cloud_device(od_scaling, cloud.od_scaling,
-                              scaling * sizeof(double), "copy cloud od_scaling")) return 5;
+  if (!device_handoff && !copy_from_cloud_device(
+          od_scaling, cloud.od_scaling, scaling * sizeof(double),
+          cloud.stream, "copy cloud od_scaling")) return 5;
   if (!copy_from_cloud_device(total_cloud_cover, cloud.total_cloud_cover,
-                              ncol * sizeof(double), "copy cloud cover")) return 5;
-  if (!cuda_ok(cudaStreamSynchronize(cloud.stream), "cloud-generator synchronize")) return 6;
+                              ncol * sizeof(double), cloud.stream,
+                              "copy cloud cover")) return 5;
+  if (!cuda_ok(cudaStreamSynchronize(cloud.stream),
+               "cloud-generator synchronize")) return 6;
+  ready_cloud_workspace = selected_cloud;
   return 0;
 }
 
@@ -1349,7 +1401,7 @@ extern "C" void oifs_cuda_radiation_finalize(void) {
   std::lock_guard<std::mutex> lock(workspace_mutex);
   release_workspace();
   release_longwave_workspace();
-  release_cloud_workspace();
+  release_cloud_workspaces();
 }
 
 extern "C" const char* oifs_cuda_radiation_last_error(void) {

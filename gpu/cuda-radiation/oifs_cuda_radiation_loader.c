@@ -18,7 +18,7 @@ typedef int (*compute_lw_fn)(
     const double *, const double *, double *, double *, double *, double *,
     double *, double *, double *);
 typedef int (*compute_cloud_fn)(
-    int, int, int, int, int, const int *, const double *, double,
+    int, int, int, int, int, int, const int *, const double *, double,
     const double *, const double *, double, const double *, int, int,
     double, double, const double *, double *, double *);
 typedef const char *(*last_error_fn)(void);
@@ -68,6 +68,7 @@ static void load_cuda_library(void) {
 
 int oifs_cuda_bridge_cloud_compute_dp(
     int ng, int nlev, int ncol, int overlap_scheme, int is_beta_overlap,
+    int device_handoff,
     const int *seeds, const double *active, double frac_threshold,
     const double *cloud_fraction, const double *overlap_parameter,
     double decorrelation_scaling, const double *fractional_std,
@@ -77,7 +78,7 @@ int oifs_cuda_bridge_cloud_compute_dp(
   pthread_once(&load_once, load_cuda_library);
   if (cuda_compute_cloud == NULL) return -1;
   return cuda_compute_cloud(
-      ng, nlev, ncol, overlap_scheme, is_beta_overlap, seeds, active,
+      ng, nlev, ncol, overlap_scheme, is_beta_overlap, device_handoff, seeds, active,
       frac_threshold, cloud_fraction, overlap_parameter,
       decorrelation_scaling, fractional_std, pdf_ncdf, pdf_nfsd, pdf_fsd1,
       pdf_inv_fsd_interval, pdf_values, od_scaling, total_cloud_cover);

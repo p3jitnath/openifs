@@ -67,13 +67,14 @@ module radiation_cuda_bridge
     end function oifs_cuda_lw_compute_dp
 
     integer(c_int) function oifs_cuda_cloud_compute_dp(ng,nlev,ncol, &
-         & overlap_scheme,is_beta_overlap,seeds,active,frac_threshold, &
+         & overlap_scheme,is_beta_overlap,device_handoff,seeds,active,frac_threshold, &
          & cloud_fraction,overlap_parameter,decorrelation_scaling, &
          & fractional_std,pdf_ncdf,pdf_nfsd,pdf_fsd1, &
          & pdf_inv_fsd_interval,pdf_values,od_scaling,total_cloud_cover) &
          & bind(C,name='oifs_cuda_bridge_cloud_compute_dp')
       import :: c_double, c_int
       integer(c_int), value :: ng, nlev, ncol, overlap_scheme, is_beta_overlap
+      integer(c_int), value :: device_handoff
       integer(c_int), intent(in) :: seeds(*)
       real(c_double), intent(in) :: active(*)
       real(c_double), value :: frac_threshold
@@ -187,12 +188,12 @@ contains
   end function cuda_lw_compute
 
   integer function cuda_cloud_compute(ng,nlev,ncol,overlap_scheme, &
-       & is_beta_overlap,seeds,active,frac_threshold,cloud_fraction, &
+       & is_beta_overlap,device_handoff,seeds,active,frac_threshold,cloud_fraction, &
        & overlap_parameter,decorrelation_scaling,fractional_std, &
        & pdf_ncdf,pdf_nfsd,pdf_fsd1,pdf_inv_fsd_interval,pdf_values, &
        & od_scaling,total_cloud_cover)
     integer, intent(in) :: ng, nlev, ncol, overlap_scheme
-    logical, intent(in) :: is_beta_overlap
+    logical, intent(in) :: is_beta_overlap, device_handoff
     integer, intent(in) :: seeds(ncol)
     real(jprb), intent(in) :: active(ncol), frac_threshold
     real(jprb), intent(in) :: cloud_fraction(ncol,nlev)
@@ -208,7 +209,8 @@ contains
 #if defined(OIFS_CUDA_RADIATION) && !defined(PARKIND1_SINGLE)
     cuda_cloud_compute = oifs_cuda_cloud_compute_dp(int(ng,c_int), &
          & int(nlev,c_int),int(ncol,c_int),int(overlap_scheme,c_int), &
-         & merge(1_c_int,0_c_int,is_beta_overlap),seeds,active, &
+         & merge(1_c_int,0_c_int,is_beta_overlap), &
+         & merge(1_c_int,0_c_int,device_handoff),seeds,active, &
          & real(frac_threshold,c_double),cloud_fraction,overlap_parameter, &
          & real(decorrelation_scaling,c_double),fractional_std, &
          & int(pdf_ncdf,c_int),int(pdf_nfsd,c_int), &

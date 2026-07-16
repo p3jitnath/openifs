@@ -211,7 +211,7 @@ contains
       gpu_status = 7
       if (gpu_cloud_enabled_option) then
         gpu_status = cuda_cloud_compute(ng,nlev,iendcol-istartcol+1, &
-             & config%i_overlap_scheme,config%use_beta_overlap, &
+             & config%i_overlap_scheme,config%use_beta_overlap,.not. validate_gpu_sw, &
              & single_level%iseed(istartcol:iendcol), &
              & single_level%cos_sza(istartcol:iendcol), &
              & config%cloud_fraction_threshold,cloud%fraction(istartcol:iendcol,:), &
