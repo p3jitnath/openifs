@@ -62,6 +62,7 @@ struct LongwaveWorkspace {
   double *albedo = nullptr, *source = nullptr, *inv_denominator = nullptr;
   double *flux_up_clear = nullptr, *flux_dn_clear = nullptr;
   double *flux_up_cloud = nullptr, *flux_dn_cloud = nullptr;
+  double* flux_up_surf_clear_g = nullptr;
   double *lw_up_clear = nullptr, *lw_dn_clear = nullptr;
   double *lw_up = nullptr, *lw_dn = nullptr;
   double *lw_dn_surf_clear_g = nullptr, *lw_dn_surf_g = nullptr;
@@ -72,6 +73,7 @@ LongwaveWorkspace longwave_workspace;
 
 struct CloudWorkspace {
   int ng = 0;
+  int ng_capacity = 0;
   int nlev = 0;
   int ncol = 0;
   int pdf_ncdf = 0;
@@ -91,7 +93,7 @@ struct CloudWorkspace {
   std::uint32_t* random_state = nullptr;
 };
 
-CloudWorkspace cloud_workspaces[2];
+CloudWorkspace cloud_workspace;
 CloudWorkspace* ready_cloud_workspace = nullptr;
 std::mutex workspace_mutex;
 std::string last_error;
@@ -127,9 +129,6 @@ void release_workspace() {
   free_ptr(workspace.flux_up);
   free_ptr(workspace.flux_dn_diffuse);
   free_ptr(workspace.flux_dn_direct);
-  free_ptr(workspace.flux_up_cloud);
-  free_ptr(workspace.flux_dn_diffuse_cloud);
-  free_ptr(workspace.flux_dn_direct_cloud);
   free_ptr(workspace.sw_up_clear);
   free_ptr(workspace.sw_dn_clear);
   free_ptr(workspace.sw_dn_direct_clear);
@@ -151,10 +150,9 @@ void release_longwave_workspace() {
   FREE_LW(cloud_fraction); FREE_LW(total_cloud_cover); FREE_LW(od_scaling);
   FREE_LW(od_cloud); FREE_LW(ssa_cloud); FREE_LW(asymmetry_cloud);
   FREE_LW(ref_clear); FREE_LW(trans_clear); FREE_LW(source_up_clear);
-  FREE_LW(source_dn_clear); FREE_LW(ref_cloud); FREE_LW(trans_cloud);
-  FREE_LW(source_up_cloud); FREE_LW(source_dn_cloud); FREE_LW(albedo);
+  FREE_LW(source_dn_clear); FREE_LW(trans_cloud); FREE_LW(albedo);
   FREE_LW(source); FREE_LW(inv_denominator); FREE_LW(flux_up_clear);
-  FREE_LW(flux_dn_clear); FREE_LW(flux_up_cloud); FREE_LW(flux_dn_cloud);
+  FREE_LW(flux_dn_clear); FREE_LW(flux_up_surf_clear_g);
   FREE_LW(lw_up_clear); FREE_LW(lw_dn_clear); FREE_LW(lw_up); FREE_LW(lw_dn);
   FREE_LW(lw_dn_surf_clear_g); FREE_LW(lw_dn_surf_g);
   FREE_LW(derivative_g); FREE_LW(lw_derivatives);
@@ -179,8 +177,7 @@ void release_cloud_workspace(CloudWorkspace& cloud_workspace) {
 }
 
 void release_cloud_workspaces() {
-  release_cloud_workspace(cloud_workspaces[0]);
-  release_cloud_workspace(cloud_workspaces[1]);
+  release_cloud_workspace(cloud_workspace);
 }
 
 bool cuda_ok(cudaError_t status, const char* operation) {
@@ -260,8 +257,6 @@ bool ensure_workspace(int ng, int nbands, int nlev, int ncol) {
   ALLOCATE(trans_dir_diff, layer); ALLOCATE(trans_dir_dir, layer);
   ALLOCATE(albedo, interface); ALLOCATE(source, interface); ALLOCATE(inv_denominator, layer);
   ALLOCATE(flux_up, interface); ALLOCATE(flux_dn_diffuse, interface); ALLOCATE(flux_dn_direct, interface);
-  ALLOCATE(flux_up_cloud, interface); ALLOCATE(flux_dn_diffuse_cloud, interface);
-  ALLOCATE(flux_dn_direct_cloud, interface);
   ALLOCATE(sw_up_clear, profile); ALLOCATE(sw_dn_clear, profile);
   ALLOCATE(sw_dn_direct_clear, profile); ALLOCATE(sw_up, profile);
   ALLOCATE(sw_dn, profile); ALLOCATE(sw_dn_direct, profile);
@@ -269,6 +264,9 @@ bool ensure_workspace(int ng, int nbands, int nlev, int ncol) {
   ALLOCATE(sw_dn_direct_surf_clear_g, gpcol);
   ALLOCATE(sw_dn_diffuse_surf_g, gpcol); ALLOCATE(sw_dn_direct_surf_g, gpcol);
 #undef ALLOCATE
+  workspace.flux_up_cloud = workspace.flux_up;
+  workspace.flux_dn_diffuse_cloud = workspace.flux_dn_diffuse;
+  workspace.flux_dn_direct_cloud = workspace.flux_dn_direct;
   return true;
 }
 
@@ -308,43 +306,42 @@ bool ensure_longwave_workspace(int ng, int nbands, int nlev, int ncol) {
   ALLOCATE_LW(ssa_cloud, cloud_layer); ALLOCATE_LW(asymmetry_cloud, cloud_layer);
   ALLOCATE_LW(ref_clear, layer); ALLOCATE_LW(trans_clear, layer);
   ALLOCATE_LW(source_up_clear, layer); ALLOCATE_LW(source_dn_clear, layer);
-  ALLOCATE_LW(ref_cloud, layer); ALLOCATE_LW(trans_cloud, layer);
-  ALLOCATE_LW(source_up_cloud, layer); ALLOCATE_LW(source_dn_cloud, layer);
+  ALLOCATE_LW(trans_cloud, layer);
   ALLOCATE_LW(albedo, interface); ALLOCATE_LW(source, interface);
   ALLOCATE_LW(inv_denominator, layer); ALLOCATE_LW(flux_up_clear, interface);
-  ALLOCATE_LW(flux_dn_clear, interface); ALLOCATE_LW(flux_up_cloud, interface);
-  ALLOCATE_LW(flux_dn_cloud, interface); ALLOCATE_LW(lw_up_clear, profile);
+  ALLOCATE_LW(flux_dn_clear, interface); ALLOCATE_LW(flux_up_surf_clear_g, gpcol);
+  ALLOCATE_LW(lw_up_clear, profile);
   ALLOCATE_LW(lw_dn_clear, profile); ALLOCATE_LW(lw_up, profile);
   ALLOCATE_LW(lw_dn, profile); ALLOCATE_LW(lw_dn_surf_clear_g, gpcol);
   ALLOCATE_LW(lw_dn_surf_g, gpcol); ALLOCATE_LW(derivative_g, gpcol);
   ALLOCATE_LW(lw_derivatives, profile);
 #undef ALLOCATE_LW
+  // Clear-sky adding completes before cloudy optics starts. Retain the clear
+  // transmittance for derivatives and reuse the other three optics buffers.
+  longwave_workspace.ref_cloud = longwave_workspace.ref_clear;
+  longwave_workspace.source_up_cloud = longwave_workspace.source_up_clear;
+  longwave_workspace.source_dn_cloud = longwave_workspace.source_dn_clear;
+  longwave_workspace.flux_up_cloud = longwave_workspace.flux_up_clear;
+  longwave_workspace.flux_dn_cloud = longwave_workspace.flux_dn_clear;
   return true;
 }
 
 bool ensure_cloud_workspace(
     int ng, int nlev, int ncol, int pdf_ncdf, int pdf_nfsd,
     CloudWorkspace*& selected) {
-  for (auto& candidate : cloud_workspaces) {
-    if (candidate.ng == ng && candidate.nlev == nlev &&
-        candidate.ncol >= ncol && candidate.pdf_ncdf == pdf_ncdf &&
-        candidate.pdf_nfsd == pdf_nfsd) {
-      selected = &candidate;
-      return true;
-    }
+  if (cloud_workspace.stream && cloud_workspace.ng_capacity >= ng &&
+      cloud_workspace.nlev == nlev && cloud_workspace.ncol >= ncol &&
+      cloud_workspace.pdf_ncdf == pdf_ncdf &&
+      cloud_workspace.pdf_nfsd == pdf_nfsd) {
+    cloud_workspace.ng = ng;
+    selected = &cloud_workspace;
+    return true;
   }
 
-  selected = nullptr;
-  for (auto& candidate : cloud_workspaces) {
-    if (!candidate.stream) {
-      selected = &candidate;
-      break;
-    }
-  }
-  if (!selected) selected = &cloud_workspaces[0];
-  release_cloud_workspace(*selected);
-  auto& cloud_workspace = *selected;
+  selected = &cloud_workspace;
+  release_cloud_workspace(cloud_workspace);
   cloud_workspace.ng = ng;
+  cloud_workspace.ng_capacity = ng;
   cloud_workspace.nlev = nlev;
   cloud_workspace.ncol = ncol;
   cloud_workspace.pdf_ncdf = pdf_ncdf;
@@ -528,10 +525,9 @@ __global__ void adding_kernel(
 }
 
 __global__ void reduce_profiles_kernel(
-    int ng, int nlev, int ncol, const double* total_cloud_cover,
-    const double* flux_up_clear_g, const double* flux_dn_diffuse_clear_g,
-    const double* flux_dn_direct_clear_g, const double* flux_up_cloud_g,
-    const double* flux_dn_diffuse_cloud_g, const double* flux_dn_direct_cloud_g,
+    int ng, int nlev, int ncol, bool cloudy,
+    const double* total_cloud_cover, const double* flux_up_g,
+    const double* flux_dn_diffuse_g, const double* flux_dn_direct_g,
     double* sw_up_clear, double* sw_dn_clear, double* sw_dn_direct_clear,
     double* sw_up, double* sw_dn, double* sw_dn_direct) {
   const std::size_t linear = blockIdx.x * static_cast<std::size_t>(blockDim.x) + threadIdx.x;
@@ -540,37 +536,35 @@ __global__ void reduce_profiles_kernel(
 
   const int col = linear % ncol;
   const int lev = linear / ncol;
-  double up_clear = 0.0;
-  double diffuse_clear = 0.0;
-  double direct_clear = 0.0;
-  double up_cloud = 0.0;
-  double diffuse_cloud = 0.0;
-  double direct_cloud = 0.0;
+  double up = 0.0;
+  double diffuse = 0.0;
+  double direct = 0.0;
   for (int g = 0; g < ng; ++g) {
     const auto at = interface_index(g, lev, col, ng, nlev);
-    up_clear += flux_up_clear_g[at];
-    diffuse_clear += flux_dn_diffuse_clear_g[at];
-    direct_clear += flux_dn_direct_clear_g[at];
-    up_cloud += flux_up_cloud_g[at];
-    diffuse_cloud += flux_dn_diffuse_cloud_g[at];
-    direct_cloud += flux_dn_direct_cloud_g[at];
+    up += flux_up_g[at];
+    diffuse += flux_dn_diffuse_g[at];
+    direct += flux_dn_direct_g[at];
   }
 
-  const double cloud = total_cloud_cover[col];
-  const double clear = 1.0 - cloud;
-  sw_up_clear[linear] = up_clear;
-  sw_dn_clear[linear] = diffuse_clear + direct_clear;
-  sw_dn_direct_clear[linear] = direct_clear;
-  sw_up[linear] = cloud * up_cloud + clear * up_clear;
-  sw_dn[linear] = cloud * (diffuse_cloud + direct_cloud)
-      + clear * (diffuse_clear + direct_clear);
-  sw_dn_direct[linear] = cloud * direct_cloud + clear * direct_clear;
+  if (!cloudy) {
+    sw_up_clear[linear] = up;
+    sw_dn_clear[linear] = diffuse + direct;
+    sw_dn_direct_clear[linear] = direct;
+  } else {
+    const double cloud = total_cloud_cover[col];
+    const double clear = 1.0 - cloud;
+    sw_up[linear] = cloud * up + clear * sw_up_clear[linear];
+    sw_dn[linear] = cloud * (diffuse + direct)
+        + clear * sw_dn_clear[linear];
+    sw_dn_direct[linear] = cloud * direct
+        + clear * sw_dn_direct_clear[linear];
+  }
 }
 
 __global__ void reduce_surface_kernel(
-    int ng, int nlev, int ncol, const double* total_cloud_cover,
-    const double* flux_dn_diffuse_clear, const double* flux_dn_direct_clear,
-    const double* flux_dn_diffuse_cloud, const double* flux_dn_direct_cloud,
+    int ng, int nlev, int ncol, bool cloudy,
+    const double* total_cloud_cover, const double* flux_dn_diffuse,
+    const double* flux_dn_direct,
     double* sw_dn_diffuse_surf_clear_g, double* sw_dn_direct_surf_clear_g,
     double* sw_dn_diffuse_surf_g, double* sw_dn_direct_surf_g) {
   const std::size_t linear = blockIdx.x * static_cast<std::size_t>(blockDim.x) + threadIdx.x;
@@ -580,16 +574,17 @@ __global__ void reduce_surface_kernel(
   const int g = linear % ng;
   const int col = linear / ng;
   const auto at = interface_index(g, nlev, col, ng, nlev);
-  const double diffuse_clear = flux_dn_diffuse_clear[at];
-  const double direct_clear = flux_dn_direct_clear[at];
-  const double cloud = total_cloud_cover[col];
-  const double clear = 1.0 - cloud;
-  sw_dn_diffuse_surf_clear_g[linear] = diffuse_clear;
-  sw_dn_direct_surf_clear_g[linear] = direct_clear;
-  sw_dn_diffuse_surf_g[linear] = cloud * flux_dn_diffuse_cloud[at]
-      + clear * diffuse_clear;
-  sw_dn_direct_surf_g[linear] = cloud * flux_dn_direct_cloud[at]
-      + clear * direct_clear;
+  if (!cloudy) {
+    sw_dn_diffuse_surf_clear_g[linear] = flux_dn_diffuse[at];
+    sw_dn_direct_surf_clear_g[linear] = flux_dn_direct[at];
+  } else {
+    const double cloud = total_cloud_cover[col];
+    const double clear = 1.0 - cloud;
+    sw_dn_diffuse_surf_g[linear] = cloud * flux_dn_diffuse[at]
+        + clear * sw_dn_diffuse_surf_clear_g[linear];
+    sw_dn_direct_surf_g[linear] = cloud * flux_dn_direct[at]
+        + clear * sw_dn_direct_surf_clear_g[linear];
+  }
 }
 
 __device__ inline void longwave_no_scattering(
@@ -770,40 +765,42 @@ __global__ void longwave_adding_kernel(
 }
 
 __global__ void reduce_longwave_kernel(
-    int ng, int nlev, int ncol, double cloud_fraction_threshold,
-    const double* total_cloud_cover, const double* flux_up_clear_g,
-    const double* flux_dn_clear_g, const double* flux_up_cloud_g,
-    const double* flux_dn_cloud_g, double* lw_up_clear, double* lw_dn_clear,
+    int ng, int nlev, int ncol, bool cloudy,
+    double cloud_fraction_threshold, const double* total_cloud_cover,
+    const double* flux_up_g, const double* flux_dn_g,
+    double* lw_up_clear, double* lw_dn_clear,
     double* lw_up, double* lw_dn) {
   const std::size_t linear = blockIdx.x * static_cast<std::size_t>(blockDim.x) + threadIdx.x;
   const std::size_t count = static_cast<std::size_t>(ncol) * (nlev + 1);
   if (linear >= count) return;
   const int col = linear % ncol;
   const int lev = linear / ncol;
-  double up_clear = 0.0, dn_clear = 0.0, up_cloud = 0.0, dn_cloud = 0.0;
+  double up = 0.0, dn = 0.0;
   for (int g = 0; g < ng; ++g) {
     const auto at = interface_index(g, lev, col, ng, nlev);
-    up_clear += flux_up_clear_g[at];
-    dn_clear += flux_dn_clear_g[at];
-    up_cloud += flux_up_cloud_g[at];
-    dn_cloud += flux_dn_cloud_g[at];
+    up += flux_up_g[at];
+    dn += flux_dn_g[at];
   }
-  const double cloud = total_cloud_cover[col];
-  lw_up_clear[linear] = up_clear;
-  lw_dn_clear[linear] = dn_clear;
-  if (cloud >= cloud_fraction_threshold) {
-    lw_up[linear] = cloud * up_cloud + (1.0 - cloud) * up_clear;
-    lw_dn[linear] = cloud * dn_cloud + (1.0 - cloud) * dn_clear;
+  if (!cloudy) {
+    lw_up_clear[linear] = up;
+    lw_dn_clear[linear] = dn;
   } else {
-    lw_up[linear] = up_clear;
-    lw_dn[linear] = dn_clear;
+    const double cloud = total_cloud_cover[col];
+    if (cloud >= cloud_fraction_threshold) {
+      lw_up[linear] = cloud * up + (1.0 - cloud) * lw_up_clear[linear];
+      lw_dn[linear] = cloud * dn + (1.0 - cloud) * lw_dn_clear[linear];
+    } else {
+      lw_up[linear] = lw_up_clear[linear];
+      lw_dn[linear] = lw_dn_clear[linear];
+    }
   }
 }
 
 __global__ void reduce_longwave_surface_kernel(
-    int ng, int nlev, int ncol, double cloud_fraction_threshold,
-    const double* total_cloud_cover, const double* flux_dn_clear,
-    const double* flux_dn_cloud, double* lw_dn_surf_clear_g,
+    int ng, int nlev, int ncol, bool cloudy,
+    double cloud_fraction_threshold, const double* total_cloud_cover,
+    const double* flux_up, const double* flux_dn,
+    double* flux_up_surf_clear_g, double* lw_dn_surf_clear_g,
     double* lw_dn_surf_g) {
   const std::size_t linear = blockIdx.x * static_cast<std::size_t>(blockDim.x) + threadIdx.x;
   const std::size_t count = static_cast<std::size_t>(ng) * ncol;
@@ -811,18 +808,22 @@ __global__ void reduce_longwave_surface_kernel(
   const int g = linear % ng;
   const int col = linear / ng;
   const auto surface = interface_index(g, nlev, col, ng, nlev);
-  const double clear_value = flux_dn_clear[surface];
-  const double cloud = total_cloud_cover[col];
-  lw_dn_surf_clear_g[linear] = clear_value;
-  lw_dn_surf_g[linear] = cloud >= cloud_fraction_threshold
-      ? cloud * flux_dn_cloud[surface] + (1.0 - cloud) * clear_value
-      : clear_value;
+  if (!cloudy) {
+    flux_up_surf_clear_g[linear] = flux_up[surface];
+    lw_dn_surf_clear_g[linear] = flux_dn[surface];
+  } else {
+    const double clear_value = lw_dn_surf_clear_g[linear];
+    const double cloud = total_cloud_cover[col];
+    lw_dn_surf_g[linear] = cloud >= cloud_fraction_threshold
+        ? cloud * flux_dn[surface] + (1.0 - cloud) * clear_value
+        : clear_value;
+  }
 }
 
 __global__ void longwave_derivatives_kernel(
     int ng, int nlev, int ncol, double cloud_fraction_threshold,
     const double* total_cloud_cover, const double* trans_clear,
-    const double* trans_cloud, const double* flux_up_clear,
+    const double* trans_cloud, const double* flux_up_clear_surface,
     const double* flux_up_cloud, double* derivative_g,
     double* lw_derivatives) {
   const int col = blockIdx.x * blockDim.x + threadIdx.x;
@@ -830,13 +831,19 @@ __global__ void longwave_derivatives_kernel(
   const double cloud = total_cloud_cover[col];
   const bool has_cloud = cloud >= cloud_fraction_threshold;
   const double* trans = has_cloud ? trans_cloud : trans_clear;
-  const double* up = has_cloud ? flux_up_cloud : flux_up_clear;
   double total = 0.0;
-  for (int g = 0; g < ng; ++g)
-    total += up[interface_index(g, nlev, col, ng, nlev)];
   for (int g = 0; g < ng; ++g) {
     const auto gp = g + static_cast<std::size_t>(ng) * col;
-    derivative_g[gp] = up[interface_index(g, nlev, col, ng, nlev)] / total;
+    total += has_cloud
+        ? flux_up_cloud[interface_index(g, nlev, col, ng, nlev)]
+        : flux_up_clear_surface[gp];
+  }
+  for (int g = 0; g < ng; ++g) {
+    const auto gp = g + static_cast<std::size_t>(ng) * col;
+    const double up = has_cloud
+        ? flux_up_cloud[interface_index(g, nlev, col, ng, nlev)]
+        : flux_up_clear_surface[gp];
+    derivative_g[gp] = up / total;
   }
   lw_derivatives[col + static_cast<std::size_t>(ncol) * nlev] = 1.0;
   for (int lev = nlev - 1; lev >= 0; --lev) {
@@ -851,10 +858,10 @@ __global__ void longwave_derivatives_kernel(
   if (has_cloud && cloud < 1.0 - cloud_fraction_threshold) {
     total = 0.0;
     for (int g = 0; g < ng; ++g)
-      total += flux_up_clear[interface_index(g, nlev, col, ng, nlev)];
+      total += flux_up_clear_surface[g + static_cast<std::size_t>(ng) * col];
     for (int g = 0; g < ng; ++g) {
       const auto gp = g + static_cast<std::size_t>(ng) * col;
-      derivative_g[gp] = flux_up_clear[interface_index(g, nlev, col, ng, nlev)] / total;
+      derivative_g[gp] = flux_up_clear_surface[gp] / total;
     }
     for (int lev = nlev - 1; lev >= 0; --lev) {
       double sum = 0.0;
@@ -1226,6 +1233,17 @@ extern "C" int oifs_cuda_sw_compute_dp(
       workspace.trans_dir_dir, workspace.albedo, workspace.source,
       workspace.inv_denominator, workspace.flux_up, workspace.flux_dn_diffuse,
       workspace.flux_dn_direct);
+  reduce_profiles_kernel<<<profile_blocks, block_size, 0, workspace.stream>>>(
+      ng, nlev, ncol, false, device_cloud_cover, workspace.flux_up,
+      workspace.flux_dn_diffuse, workspace.flux_dn_direct,
+      workspace.sw_up_clear, workspace.sw_dn_clear,
+      workspace.sw_dn_direct_clear, workspace.sw_up, workspace.sw_dn,
+      workspace.sw_dn_direct);
+  reduce_surface_kernel<<<adding_blocks, block_size, 0, workspace.stream>>>(
+      ng, nlev, ncol, false, device_cloud_cover, workspace.flux_dn_diffuse,
+      workspace.flux_dn_direct, workspace.sw_dn_diffuse_surf_clear_g,
+      workspace.sw_dn_direct_surf_clear_g, workspace.sw_dn_diffuse_surf_g,
+      workspace.sw_dn_direct_surf_g);
   optics_kernel<<<optics_blocks, block_size, 0, workspace.stream>>>(
       ng, nbands, nlev, ncol, true, do_delta_scaling != 0, cloud_fraction_threshold,
       workspace.mu0, workspace.od, workspace.ssa, workspace.asymmetry,
@@ -1241,16 +1259,14 @@ extern "C" int oifs_cuda_sw_compute_dp(
       workspace.inv_denominator, workspace.flux_up_cloud,
       workspace.flux_dn_diffuse_cloud, workspace.flux_dn_direct_cloud);
   reduce_profiles_kernel<<<profile_blocks, block_size, 0, workspace.stream>>>(
-      ng, nlev, ncol, device_cloud_cover, workspace.flux_up,
+      ng, nlev, ncol, true, device_cloud_cover, workspace.flux_up,
       workspace.flux_dn_diffuse, workspace.flux_dn_direct,
-      workspace.flux_up_cloud, workspace.flux_dn_diffuse_cloud,
-      workspace.flux_dn_direct_cloud, workspace.sw_up_clear,
-      workspace.sw_dn_clear, workspace.sw_dn_direct_clear, workspace.sw_up,
-      workspace.sw_dn, workspace.sw_dn_direct);
+      workspace.sw_up_clear, workspace.sw_dn_clear,
+      workspace.sw_dn_direct_clear, workspace.sw_up, workspace.sw_dn,
+      workspace.sw_dn_direct);
   reduce_surface_kernel<<<adding_blocks, block_size, 0, workspace.stream>>>(
-      ng, nlev, ncol, device_cloud_cover, workspace.flux_dn_diffuse,
-      workspace.flux_dn_direct, workspace.flux_dn_diffuse_cloud,
-      workspace.flux_dn_direct_cloud, workspace.sw_dn_diffuse_surf_clear_g,
+      ng, nlev, ncol, true, device_cloud_cover, workspace.flux_dn_diffuse,
+      workspace.flux_dn_direct, workspace.sw_dn_diffuse_surf_clear_g,
       workspace.sw_dn_direct_surf_clear_g, workspace.sw_dn_diffuse_surf_g,
       workspace.sw_dn_direct_surf_g);
   if (!cuda_ok(cudaGetLastError(), "shortwave kernel launch")) return 4;
@@ -1344,6 +1360,14 @@ extern "C" int oifs_cuda_lw_compute_dp(
       ng, nlev, ncol, do_aerosol_scattering != 0, lw.ref_clear, lw.trans_clear,
       lw.source_up_clear, lw.source_dn_clear, lw.emission, lw.albedo_surface,
       lw.albedo, lw.source, lw.inv_denominator, lw.flux_up_clear, lw.flux_dn_clear);
+  reduce_longwave_kernel<<<profile_blocks, block_size, 0, lw.stream>>>(
+      ng, nlev, ncol, false, cloud_fraction_threshold, device_cloud_cover,
+      lw.flux_up_clear, lw.flux_dn_clear, lw.lw_up_clear, lw.lw_dn_clear,
+      lw.lw_up, lw.lw_dn);
+  reduce_longwave_surface_kernel<<<column_blocks, block_size, 0, lw.stream>>>(
+      ng, nlev, ncol, false, cloud_fraction_threshold, device_cloud_cover,
+      lw.flux_up_clear, lw.flux_dn_clear, lw.flux_up_surf_clear_g,
+      lw.lw_dn_surf_clear_g, lw.lw_dn_surf_g);
   longwave_optics_kernel<<<layer_blocks, block_size, 0, lw.stream>>>(
       ng, nbands, nlev, ncol, true, do_aerosol_scattering != 0,
       do_cloud_scattering != 0, cloud_fraction_threshold, lw.od, lw.ssa,
@@ -1356,18 +1380,18 @@ extern "C" int oifs_cuda_lw_compute_dp(
       lw.emission, lw.albedo_surface, lw.albedo, lw.source, lw.inv_denominator,
       lw.flux_up_cloud, lw.flux_dn_cloud);
   reduce_longwave_kernel<<<profile_blocks, block_size, 0, lw.stream>>>(
-      ng, nlev, ncol, cloud_fraction_threshold, device_cloud_cover,
-      lw.flux_up_clear, lw.flux_dn_clear, lw.flux_up_cloud, lw.flux_dn_cloud,
+      ng, nlev, ncol, true, cloud_fraction_threshold, device_cloud_cover,
+      lw.flux_up_cloud, lw.flux_dn_cloud,
       lw.lw_up_clear, lw.lw_dn_clear, lw.lw_up, lw.lw_dn);
   reduce_longwave_surface_kernel<<<column_blocks, block_size, 0, lw.stream>>>(
-      ng, nlev, ncol, cloud_fraction_threshold, device_cloud_cover,
-      lw.flux_dn_clear, lw.flux_dn_cloud, lw.lw_dn_surf_clear_g,
-      lw.lw_dn_surf_g);
+      ng, nlev, ncol, true, cloud_fraction_threshold, device_cloud_cover,
+      lw.flux_up_cloud, lw.flux_dn_cloud, lw.flux_up_surf_clear_g,
+      lw.lw_dn_surf_clear_g, lw.lw_dn_surf_g);
   if (do_derivatives) {
     longwave_derivatives_kernel<<<derivative_blocks, block_size, 0, lw.stream>>>(
         ng, nlev, ncol, cloud_fraction_threshold, device_cloud_cover,
-        lw.trans_clear, lw.trans_cloud, lw.flux_up_clear, lw.flux_up_cloud,
-        lw.derivative_g, lw.lw_derivatives);
+        lw.trans_clear, lw.trans_cloud, lw.flux_up_surf_clear_g,
+        lw.flux_up_cloud, lw.derivative_g, lw.lw_derivatives);
   } else {
     cudaMemsetAsync(lw.lw_derivatives, 0, profile * sizeof(double), lw.stream);
   }
