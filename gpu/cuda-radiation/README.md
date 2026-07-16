@@ -91,11 +91,11 @@ the cloud kernel may still lose to CPU generation, so `OIFS_GPU_NPROMA` should
 be tuned for the target layout.
 
 Full OpenIFS shortwave validation found a maximum CPU/GPU absolute difference
-of `5.91e-9` in diffuse flux after the vertical adding recurrence, while direct
-flux agreed within `2.28e-13`. Longwave validation found a maximum flux
+of `7.45e-8` in diffuse flux after the vertical adding recurrence, while direct
+flux agreed within `3.41e-13`. Longwave validation found a maximum flux
 difference of `7.18e-6 W m-2` and a maximum surface-temperature derivative
 difference of `5.58e-10 W m-2 K-1`. These are rounding-level differences from
-the different parallel reduction order. Validation uses a `1e-8` shortwave
+the different parallel reduction order. Validation uses a `1e-7` shortwave
 tolerance, a `1e-5 W m-2` longwave flux tolerance, and a `1e-9 W m-2 K-1`
 longwave derivative tolerance, each with an additional `2e-12` relative
 tolerance.

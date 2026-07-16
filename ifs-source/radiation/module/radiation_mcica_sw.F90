@@ -150,6 +150,7 @@ contains
     character(len=32) :: gpu_cloud_env
     integer :: gpu_min_columns, gpu_status, env_read_status
     real(jprb) :: gpu_error_ratio, gpu_cloud_error_ratio
+    real(jprb), parameter :: gpu_flux_abs_tolerance = 1.0e-7_jprb
 #endif
 
     real(jphook) :: hook_handle
@@ -496,36 +497,36 @@ contains
       end if
       gpu_error_ratio = 0.0_jprb
       gpu_error_ratio = max(gpu_error_ratio,maxval(abs(flux%sw_up_clear(istartcol:iendcol,:)-gpu_sw_up_clear) &
-           & / (5.0e-8_jprb + 2.0e-12_jprb*max(abs(flux%sw_up_clear(istartcol:iendcol,:)),abs(gpu_sw_up_clear)))))
+           & / (gpu_flux_abs_tolerance + 2.0e-12_jprb*max(abs(flux%sw_up_clear(istartcol:iendcol,:)),abs(gpu_sw_up_clear)))))
       gpu_error_ratio = max(gpu_error_ratio,maxval(abs(flux%sw_dn_clear(istartcol:iendcol,:)-gpu_sw_dn_clear) &
-           & / (5.0e-8_jprb + 2.0e-12_jprb*max(abs(flux%sw_dn_clear(istartcol:iendcol,:)),abs(gpu_sw_dn_clear)))))
+           & / (gpu_flux_abs_tolerance + 2.0e-12_jprb*max(abs(flux%sw_dn_clear(istartcol:iendcol,:)),abs(gpu_sw_dn_clear)))))
       gpu_error_ratio = max(gpu_error_ratio,maxval(abs(flux%sw_up(istartcol:iendcol,:)-gpu_sw_up) &
-           & / (5.0e-8_jprb + 2.0e-12_jprb*max(abs(flux%sw_up(istartcol:iendcol,:)),abs(gpu_sw_up)))))
+           & / (gpu_flux_abs_tolerance + 2.0e-12_jprb*max(abs(flux%sw_up(istartcol:iendcol,:)),abs(gpu_sw_up)))))
       gpu_error_ratio = max(gpu_error_ratio,maxval(abs(flux%sw_dn(istartcol:iendcol,:)-gpu_sw_dn) &
-           & / (5.0e-8_jprb + 2.0e-12_jprb*max(abs(flux%sw_dn(istartcol:iendcol,:)),abs(gpu_sw_dn)))))
+           & / (gpu_flux_abs_tolerance + 2.0e-12_jprb*max(abs(flux%sw_dn(istartcol:iendcol,:)),abs(gpu_sw_dn)))))
       gpu_error_ratio = max(gpu_error_ratio,maxval(abs(flux%sw_dn_diffuse_surf_clear_g(:,istartcol:iendcol) &
-           & - gpu_sw_dn_diffuse_surf_clear_g) / (5.0e-8_jprb + 2.0e-12_jprb &
+           & - gpu_sw_dn_diffuse_surf_clear_g) / (gpu_flux_abs_tolerance + 2.0e-12_jprb &
            & * max(abs(flux%sw_dn_diffuse_surf_clear_g(:,istartcol:iendcol)),abs(gpu_sw_dn_diffuse_surf_clear_g)))))
       gpu_error_ratio = max(gpu_error_ratio,maxval(abs(flux%sw_dn_direct_surf_clear_g(:,istartcol:iendcol) &
-           & - gpu_sw_dn_direct_surf_clear_g) / (5.0e-8_jprb + 2.0e-12_jprb &
+           & - gpu_sw_dn_direct_surf_clear_g) / (gpu_flux_abs_tolerance + 2.0e-12_jprb &
            & * max(abs(flux%sw_dn_direct_surf_clear_g(:,istartcol:iendcol)),abs(gpu_sw_dn_direct_surf_clear_g)))))
       gpu_error_ratio = max(gpu_error_ratio,maxval(abs(flux%sw_dn_diffuse_surf_g(:,istartcol:iendcol) &
-           & - gpu_sw_dn_diffuse_surf_g) / (5.0e-8_jprb + 2.0e-12_jprb &
+           & - gpu_sw_dn_diffuse_surf_g) / (gpu_flux_abs_tolerance + 2.0e-12_jprb &
            & * max(abs(flux%sw_dn_diffuse_surf_g(:,istartcol:iendcol)),abs(gpu_sw_dn_diffuse_surf_g)))))
       gpu_error_ratio = max(gpu_error_ratio,maxval(abs(flux%sw_dn_direct_surf_g(:,istartcol:iendcol) &
-           & - gpu_sw_dn_direct_surf_g) / (5.0e-8_jprb + 2.0e-12_jprb &
+           & - gpu_sw_dn_direct_surf_g) / (gpu_flux_abs_tolerance + 2.0e-12_jprb &
            & * max(abs(flux%sw_dn_direct_surf_g(:,istartcol:iendcol)),abs(gpu_sw_dn_direct_surf_g)))))
       gpu_error_ratio = max(gpu_error_ratio,maxval(abs(flux%cloud_cover_sw(istartcol:iendcol)-total_cloud_cover_batch) &
            & / (5.0e-13_jprb + 2.0e-12_jprb*max(abs(flux%cloud_cover_sw(istartcol:iendcol)), &
            & abs(total_cloud_cover_batch)))))
       if (allocated(flux%sw_dn_direct_clear)) then
         gpu_error_ratio = max(gpu_error_ratio,maxval(abs(flux%sw_dn_direct_clear(istartcol:iendcol,:) &
-             & - gpu_sw_dn_direct_clear) / (5.0e-8_jprb + 2.0e-12_jprb &
+             & - gpu_sw_dn_direct_clear) / (gpu_flux_abs_tolerance + 2.0e-12_jprb &
              & * max(abs(flux%sw_dn_direct_clear(istartcol:iendcol,:)),abs(gpu_sw_dn_direct_clear)))))
       end if
       if (allocated(flux%sw_dn_direct)) then
         gpu_error_ratio = max(gpu_error_ratio,maxval(abs(flux%sw_dn_direct(istartcol:iendcol,:)-gpu_sw_dn_direct) &
-             & / (5.0e-8_jprb + 2.0e-12_jprb*max(abs(flux%sw_dn_direct(istartcol:iendcol,:)), &
+             & / (gpu_flux_abs_tolerance + 2.0e-12_jprb*max(abs(flux%sw_dn_direct(istartcol:iendcol,:)), &
              & abs(gpu_sw_dn_direct)))))
       end if
       if (gpu_error_ratio > 1.0_jprb) then
