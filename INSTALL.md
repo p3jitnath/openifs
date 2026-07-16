@@ -8,8 +8,8 @@ tests.
 
 - Platform: Isambard-AI, HPE Cray EX, AArch64
 - Operating system: SUSE Linux on a Cray Shasta compute node
-- OpenIFS source: <https://github.com/ecmwf-ifs/openifs>
-- OpenIFS version: 48r1.1 (`main`, commit `b62cb47` at installation time)
+- OpenIFS source: `git@github.com:p3jitnath/openifs.git`
+- OpenIFS version: 48r1.1 plus the optional CUDA radiation backend on `main`
 - Compiler: GNU 12.3 through the Cray compiler wrappers
 - MPI: Cray MPICH 8.1.32
 - HDF5: Cray HDF5 1.14.3.5
@@ -21,8 +21,8 @@ tests.
 From the parent directory:
 
 ```bash
-git clone https://github.com/ecmwf-ifs/openifs.git ecmwf-openifs
-cd ecmwf-openifs
+git clone git@github.com:p3jitnath/openifs.git openifs
+cd openifs
 ```
 
 For a strictly versioned installation, use the release tag instead:
@@ -134,7 +134,41 @@ legacy option during early configuration and the namespaced option later.
 AEC supplies optional CCSDS GRIB compression and is not required by the
 bundled OpenIFS tests.
 
-## 6. Build OpenIFS
+## 6. Build the optional CUDA radiation backend
+
+Skip this section for a CPU-only build. The CUDA sidecar is compiled
+separately so the main OpenIFS build continues to use the supported Cray GNU
+12.3 environment. Full usage and performance details are in
+[GPU.md](GPU.md).
+
+On a GH200 compute node, make CUDA 12.6 available and configure the sidecar
+with the system C/C++ compilers. Do not let `nvcc` select GNU 14 as its host
+compiler.
+
+```bash
+module load cuda/12.6
+
+CC=/usr/bin/cc CXX=/usr/bin/c++ cmake \
+  -S gpu/cuda-radiation \
+  -B build-gpu/cuda-radiation \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_CUDA_ARCHITECTURES=90
+
+cmake --build build-gpu/cuda-radiation -j 32
+ctest --test-dir build-gpu/cuda-radiation --output-on-failure
+```
+
+The two CUDA parity tests should pass. Tell the subsequent OpenIFS build to
+link the CUDA-independent loader:
+
+```bash
+export CMAKE_ARGS="${CMAKE_ARGS:+${CMAKE_ARGS} }-DOIFS_CUDA_RADIATION_LOADER=$PWD/build-gpu/cuda-radiation/liboifs_cuda_radiation_loader.so"
+```
+
+The loader uses `dlopen` at runtime. A loader-enabled OpenIFS executable still
+runs normally on CPU-only nodes unless GPU radiation is explicitly enabled.
+
+## 7. Build OpenIFS
 
 With the modules, compiler variables, and OpenIFS environment loaded, create
 the bundle and perform a clean build:
@@ -163,7 +197,7 @@ build/bin/MASTER_scm.SP
 These are dynamically linked AArch64 executables and must be run with the
 same Cray compiler, MPI, HDF5, and NetCDF environment loaded.
 
-## 7. Provide an `mpirun` compatibility wrapper
+## 8. Provide an `mpirun` compatibility wrapper
 
 The generic OpenIFS test scripts invoke `mpirun -np N`, while Isambard-AI
 launches Cray MPICH applications with Slurm's `srun`. Create
@@ -198,7 +232,7 @@ export PATH="$PWD/.local/bin:$PATH"
 Tests must be run inside an Isambard-AI Slurm allocation because the wrapper
 starts model ranks with `srun`.
 
-## 8. Run the OpenIFS acceptance tests
+## 9. Run the OpenIFS acceptance tests
 
 In a Slurm allocation, load the complete runtime environment:
 
@@ -236,13 +270,13 @@ The complete build log is written to `build/build.log`. The most recent test
 summary is written to `openifs-test.log`, with detailed CTest output under
 `build/Testing/Temporary/`.
 
-## 9. Starting a new shell
+## 10. Starting a new shell
 
 The following setup is required whenever using this build in a new shell or
 batch job:
 
 ```bash
-cd ecmwf-openifs
+cd openifs
 
 module load PrgEnv-gnu/8.6.0
 module swap gcc-native/14.2 gcc-native/12.3

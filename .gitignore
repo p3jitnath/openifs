@@ -4,6 +4,7 @@
 /build-gpu/
 /install/
 /*.log
+/PROGRESS.md
 
 # ecbundle (cloned at build time by openifs-bundle)
 /ecbundle/

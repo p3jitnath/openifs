@@ -46,9 +46,23 @@ The minimum software packages required to run OpenIFS on Linux (and UNIX-like op
 
 ## Installing and Building OpenIFS
 
+For the tested Isambard-AI setup, follow [INSTALL.md](INSTALL.md). It records
+the required Cray/GNU environment, dependency workarounds, Slurm test setup
+and the optional CUDA radiation build. Users interested in the GPU backend
+should also read [GPU.md](GPU.md) for runtime controls, validation and measured
+performance.
+
 ### Clone OpenIFS
 
-OpenIFS is available directly from this repository and it can be extracted by either cloning or downloading the package:
+This GPU-enabled OpenIFS tree can be cloned over SSH:
+
+```bash
+git clone git@github.com:p3jitnath/openifs.git
+cd openifs
+```
+
+Official ECMWF release branches and tags remain available from the upstream
+repository:
 
 * Extract just the release branch using a shallow clone that targets a specific release branch, e.g.
   * `git clone --depth 1 --branch openifs-lts/CY48R1.1 --single-branch https://github.com/ecmwf-ifs/openifs.git openifs-48r1.1`
