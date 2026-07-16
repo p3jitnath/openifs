@@ -7,6 +7,7 @@ module radiation_cuda_bridge
 
   private
   public :: cuda_radiation_available, cuda_sw_compute, cuda_lw_compute
+  public :: cuda_cloud_compute
 
 #if defined(OIFS_CUDA_RADIATION) && !defined(PARKIND1_SINGLE)
   interface
@@ -64,6 +65,26 @@ module radiation_cuda_bridge
       real(c_double), intent(out) :: lw_dn_surf_clear_g(*), lw_dn_surf_g(*)
       real(c_double), intent(out) :: lw_derivatives(*)
     end function oifs_cuda_lw_compute_dp
+
+    integer(c_int) function oifs_cuda_cloud_compute_dp(ng,nlev,ncol, &
+         & overlap_scheme,is_beta_overlap,seeds,active,frac_threshold, &
+         & cloud_fraction,overlap_parameter,decorrelation_scaling, &
+         & fractional_std,pdf_ncdf,pdf_nfsd,pdf_fsd1, &
+         & pdf_inv_fsd_interval,pdf_values,od_scaling,total_cloud_cover) &
+         & bind(C,name='oifs_cuda_bridge_cloud_compute_dp')
+      import :: c_double, c_int
+      integer(c_int), value :: ng, nlev, ncol, overlap_scheme, is_beta_overlap
+      integer(c_int), intent(in) :: seeds(*)
+      real(c_double), intent(in) :: active(*)
+      real(c_double), value :: frac_threshold
+      real(c_double), intent(in) :: cloud_fraction(*), overlap_parameter(*)
+      real(c_double), value :: decorrelation_scaling
+      real(c_double), intent(in) :: fractional_std(*)
+      integer(c_int), value :: pdf_ncdf, pdf_nfsd
+      real(c_double), value :: pdf_fsd1, pdf_inv_fsd_interval
+      real(c_double), intent(in) :: pdf_values(*)
+      real(c_double), intent(out) :: od_scaling(*), total_cloud_cover(*)
+    end function oifs_cuda_cloud_compute_dp
   end interface
 #endif
 
@@ -164,5 +185,38 @@ contains
     cuda_lw_compute = -1
 #endif
   end function cuda_lw_compute
+
+  integer function cuda_cloud_compute(ng,nlev,ncol,overlap_scheme, &
+       & is_beta_overlap,seeds,active,frac_threshold,cloud_fraction, &
+       & overlap_parameter,decorrelation_scaling,fractional_std, &
+       & pdf_ncdf,pdf_nfsd,pdf_fsd1,pdf_inv_fsd_interval,pdf_values, &
+       & od_scaling,total_cloud_cover)
+    integer, intent(in) :: ng, nlev, ncol, overlap_scheme
+    logical, intent(in) :: is_beta_overlap
+    integer, intent(in) :: seeds(ncol)
+    real(jprb), intent(in) :: active(ncol), frac_threshold
+    real(jprb), intent(in) :: cloud_fraction(ncol,nlev)
+    real(jprb), intent(in) :: overlap_parameter(ncol,nlev-1)
+    real(jprb), intent(in) :: decorrelation_scaling
+    real(jprb), intent(in) :: fractional_std(ncol,nlev)
+    integer, intent(in) :: pdf_ncdf, pdf_nfsd
+    real(jprb), intent(in) :: pdf_fsd1, pdf_inv_fsd_interval
+    real(jprb), intent(in) :: pdf_values(pdf_ncdf,pdf_nfsd)
+    real(jprb), intent(out) :: od_scaling(ng,nlev,ncol)
+    real(jprb), intent(out) :: total_cloud_cover(ncol)
+
+#if defined(OIFS_CUDA_RADIATION) && !defined(PARKIND1_SINGLE)
+    cuda_cloud_compute = oifs_cuda_cloud_compute_dp(int(ng,c_int), &
+         & int(nlev,c_int),int(ncol,c_int),int(overlap_scheme,c_int), &
+         & merge(1_c_int,0_c_int,is_beta_overlap),seeds,active, &
+         & real(frac_threshold,c_double),cloud_fraction,overlap_parameter, &
+         & real(decorrelation_scaling,c_double),fractional_std, &
+         & int(pdf_ncdf,c_int),int(pdf_nfsd,c_int), &
+         & real(pdf_fsd1,c_double),real(pdf_inv_fsd_interval,c_double), &
+         & pdf_values,od_scaling,total_cloud_cover)
+#else
+    cuda_cloud_compute = -1
+#endif
+  end function cuda_cloud_compute
 
 end module radiation_cuda_bridge

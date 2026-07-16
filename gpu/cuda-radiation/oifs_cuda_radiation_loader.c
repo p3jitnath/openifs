@@ -17,6 +17,10 @@ typedef int (*compute_lw_fn)(
     double, const double *, const double *, const double *, const double *,
     const double *, const double *, double *, double *, double *, double *,
     double *, double *, double *);
+typedef int (*compute_cloud_fn)(
+    int, int, int, int, int, const int *, const double *, double,
+    const double *, const double *, double, const double *, int, int,
+    double, double, const double *, double *, double *);
 typedef const char *(*last_error_fn)(void);
 
 static pthread_once_t load_once = PTHREAD_ONCE_INIT;
@@ -24,6 +28,7 @@ static void *cuda_library;
 static available_fn cuda_available;
 static compute_fn cuda_compute;
 static compute_lw_fn cuda_compute_lw;
+static compute_cloud_fn cuda_compute_cloud;
 static last_error_fn cuda_last_error;
 static char load_error[512];
 
@@ -43,10 +48,12 @@ static void load_cuda_library(void) {
                                       "oifs_cuda_radiation_available");
   cuda_compute = (compute_fn)dlsym(cuda_library, "oifs_cuda_sw_compute_dp");
   cuda_compute_lw = (compute_lw_fn)dlsym(cuda_library, "oifs_cuda_lw_compute_dp");
+  cuda_compute_cloud = (compute_cloud_fn)dlsym(
+      cuda_library, "oifs_cuda_cloud_compute_dp");
   cuda_last_error = (last_error_fn)dlsym(
       cuda_library, "oifs_cuda_radiation_last_error");
   if (cuda_available == NULL || cuda_compute == NULL || cuda_compute_lw == NULL ||
-      cuda_last_error == NULL) {
+      cuda_compute_cloud == NULL || cuda_last_error == NULL) {
     snprintf(load_error, sizeof(load_error),
              "CUDA radiation library has an incompatible API");
     dlclose(cuda_library);
@@ -54,8 +61,26 @@ static void load_cuda_library(void) {
     cuda_available = NULL;
     cuda_compute = NULL;
     cuda_compute_lw = NULL;
+    cuda_compute_cloud = NULL;
     cuda_last_error = NULL;
   }
+}
+
+int oifs_cuda_bridge_cloud_compute_dp(
+    int ng, int nlev, int ncol, int overlap_scheme, int is_beta_overlap,
+    const int *seeds, const double *active, double frac_threshold,
+    const double *cloud_fraction, const double *overlap_parameter,
+    double decorrelation_scaling, const double *fractional_std,
+    int pdf_ncdf, int pdf_nfsd, double pdf_fsd1,
+    double pdf_inv_fsd_interval, const double *pdf_values,
+    double *od_scaling, double *total_cloud_cover) {
+  pthread_once(&load_once, load_cuda_library);
+  if (cuda_compute_cloud == NULL) return -1;
+  return cuda_compute_cloud(
+      ng, nlev, ncol, overlap_scheme, is_beta_overlap, seeds, active,
+      frac_threshold, cloud_fraction, overlap_parameter,
+      decorrelation_scaling, fractional_std, pdf_ncdf, pdf_nfsd, pdf_fsd1,
+      pdf_inv_fsd_interval, pdf_values, od_scaling, total_cloud_cover);
 }
 
 int oifs_cuda_bridge_lw_compute_dp(

@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <mutex>
 #include <sstream>
@@ -68,6 +69,29 @@ struct LongwaveWorkspace {
 };
 
 LongwaveWorkspace longwave_workspace;
+
+struct CloudWorkspace {
+  int ng = 0;
+  int nlev = 0;
+  int ncol = 0;
+  int pdf_ncdf = 0;
+  int pdf_nfsd = 0;
+  cudaStream_t stream = nullptr;
+
+  int* seeds = nullptr;
+  double *active = nullptr, *cloud_fraction = nullptr;
+  double *overlap_parameter = nullptr, *fractional_std = nullptr;
+  double* pdf_values = nullptr;
+  double *od_scaling = nullptr, *total_cloud_cover = nullptr;
+  double *cumulative_cover = nullptr, *pair_cover = nullptr;
+  double *overhang = nullptr, *overlap_inhom = nullptr;
+  double* random_top = nullptr;
+  double *random_cloud = nullptr, *random_inhom1 = nullptr;
+  double* random_inhom2 = nullptr;
+  std::uint32_t* random_state = nullptr;
+};
+
+CloudWorkspace cloud_workspace;
 std::mutex workspace_mutex;
 std::string last_error;
 int selected_device = -1;
@@ -136,6 +160,20 @@ void release_longwave_workspace() {
 #undef FREE_LW
   if (longwave_workspace.stream) cudaStreamDestroy(longwave_workspace.stream);
   longwave_workspace = LongwaveWorkspace{};
+}
+
+void release_cloud_workspace() {
+#define FREE_CLOUD(member) free_ptr(cloud_workspace.member)
+  FREE_CLOUD(seeds); FREE_CLOUD(active); FREE_CLOUD(cloud_fraction);
+  FREE_CLOUD(overlap_parameter); FREE_CLOUD(fractional_std);
+  FREE_CLOUD(pdf_values); FREE_CLOUD(od_scaling);
+  FREE_CLOUD(total_cloud_cover); FREE_CLOUD(cumulative_cover);
+  FREE_CLOUD(pair_cover); FREE_CLOUD(overhang); FREE_CLOUD(overlap_inhom);
+  FREE_CLOUD(random_top); FREE_CLOUD(random_cloud); FREE_CLOUD(random_inhom1);
+  FREE_CLOUD(random_inhom2); FREE_CLOUD(random_state);
+#undef FREE_CLOUD
+  if (cloud_workspace.stream) cudaStreamDestroy(cloud_workspace.stream);
+  cloud_workspace = CloudWorkspace{};
 }
 
 bool cuda_ok(cudaError_t status, const char* operation) {
@@ -274,6 +312,51 @@ bool ensure_longwave_workspace(int ng, int nbands, int nlev, int ncol) {
   ALLOCATE_LW(lw_dn_surf_g, gpcol); ALLOCATE_LW(derivative_g, gpcol);
   ALLOCATE_LW(lw_derivatives, profile);
 #undef ALLOCATE_LW
+  return true;
+}
+
+bool ensure_cloud_workspace(
+    int ng, int nlev, int ncol, int pdf_ncdf, int pdf_nfsd) {
+  if (cloud_workspace.ng == ng && cloud_workspace.nlev == nlev &&
+      cloud_workspace.ncol >= ncol && cloud_workspace.pdf_ncdf == pdf_ncdf &&
+      cloud_workspace.pdf_nfsd == pdf_nfsd) return true;
+
+  release_cloud_workspace();
+  cloud_workspace.ng = ng;
+  cloud_workspace.nlev = nlev;
+  cloud_workspace.ncol = ncol;
+  cloud_workspace.pdf_ncdf = pdf_ncdf;
+  cloud_workspace.pdf_nfsd = pdf_nfsd;
+  const std::size_t profile = static_cast<std::size_t>(ncol) * nlev;
+  const std::size_t interfaces = static_cast<std::size_t>(ncol) * (nlev - 1);
+  const std::size_t scaling = static_cast<std::size_t>(ng) * nlev * ncol;
+  const std::size_t subcolumns = static_cast<std::size_t>(ng) * ncol;
+  const std::size_t random_state = static_cast<std::size_t>(607) * ncol;
+  const std::size_t pdf_size = static_cast<std::size_t>(pdf_ncdf) * pdf_nfsd;
+
+  if (!cuda_ok(cudaStreamCreateWithFlags(&cloud_workspace.stream, cudaStreamNonBlocking),
+               "cudaStreamCreate(cloud)")) {
+    release_cloud_workspace();
+    return false;
+  }
+#define ALLOCATE_CLOUD(member, count)                                             \
+  do {                                                                            \
+    if (!allocate(cloud_workspace.member, count, "cudaMalloc(cloud " #member ")")) { \
+      release_cloud_workspace();                                                  \
+      return false;                                                               \
+    }                                                                             \
+  } while (false)
+  ALLOCATE_CLOUD(seeds, ncol); ALLOCATE_CLOUD(active, ncol);
+  ALLOCATE_CLOUD(cloud_fraction, profile);
+  ALLOCATE_CLOUD(overlap_parameter, interfaces);
+  ALLOCATE_CLOUD(fractional_std, profile); ALLOCATE_CLOUD(pdf_values, pdf_size);
+  ALLOCATE_CLOUD(od_scaling, scaling); ALLOCATE_CLOUD(total_cloud_cover, ncol);
+  ALLOCATE_CLOUD(cumulative_cover, profile); ALLOCATE_CLOUD(pair_cover, profile);
+  ALLOCATE_CLOUD(overhang, profile); ALLOCATE_CLOUD(overlap_inhom, profile);
+  ALLOCATE_CLOUD(random_top, subcolumns); ALLOCATE_CLOUD(random_cloud, profile);
+  ALLOCATE_CLOUD(random_inhom1, profile);
+  ALLOCATE_CLOUD(random_inhom2, profile); ALLOCATE_CLOUD(random_state, random_state);
+#undef ALLOCATE_CLOUD
   return true;
 }
 
@@ -764,6 +847,208 @@ __global__ void longwave_derivatives_kernel(
   }
 }
 
+__device__ inline void cloud_rng_generate(std::uint32_t* state) {
+  constexpr std::uint32_t mask = 0x3fffffffU;
+  for (int j = 0; j < 273; ++j)
+    state[j] = mask & (state[j] + state[j + 334]);
+  for (int j = 273; j < 607; ++j)
+    state[j] = mask & (state[j] + state[j - 273]);
+}
+
+__device__ inline double cloud_rng_next(std::uint32_t* state, int& used) {
+  if (used >= 607) {
+    cloud_rng_generate(state);
+    used = 0;
+  }
+  return static_cast<double>(state[used++]) * (1.0 / 1073741824.0);
+}
+
+__device__ void cloud_rng_initialize(int seed, std::uint32_t* state, int& used) {
+  constexpr std::uint32_t mask = 123459876U;
+  std::int32_t signed_value = static_cast<std::int32_t>(
+      static_cast<std::uint32_t>(seed) ^ mask);
+  if (signed_value < 0) signed_value = -signed_value;
+  std::uint32_t value = static_cast<std::uint32_t>(signed_value);
+  if (value == 0) value = mask;
+  for (int spin = 0; spin < 64; ++spin) {
+    const bool high_bit = (value & 0x80000000U) != 0;
+    value = high_bit ? ((value ^ 87U) << 1U) | 1U : value << 1U;
+  }
+  for (int j = 0; j < 607; ++j) state[j] = 0;
+  state[1] = (value & 0x1fffffffU) << 1U;
+  state[606] = (value >> 29U) & 0x7U;
+  for (int bit = 1; bit <= 29; ++bit) {
+    for (int j = 2; j <= 605; ++j) {
+      const bool high_bit = (value & 0x80000000U) != 0;
+      if (high_bit) {
+        value = ((value ^ 87U) << 1U) | 1U;
+        state[j] |= 1U << bit;
+      } else {
+        value <<= 1U;
+      }
+    }
+  }
+  state[501] |= 1U;
+  used = 607;
+  for (int j = 0; j < 999; ++j) (void)cloud_rng_next(state, used);
+}
+
+__device__ inline double cloud_beta_to_alpha(
+    double beta, double frac1, double frac2) {
+  if (beta >= 1.0) return 1.0;
+  const double difference = fabs(frac1 - frac2);
+  return beta + (1.0 - beta) * difference /
+      (difference + 1.0 / beta - 1.0);
+}
+
+__device__ inline double cloud_pdf_sample(
+    double fsd, double cdf, int ncdf, int nfsd, double fsd1,
+    double inv_fsd_interval, const double* values) {
+  double weighted_cdf = cdf * (ncdf - 1) + 1.0;
+  int icdf = static_cast<int>(weighted_cdf);
+  icdf = icdf < 1 ? 1 : (icdf > ncdf - 1 ? ncdf - 1 : icdf);
+  weighted_cdf = fmax(0.0, fmin(weighted_cdf - icdf, 1.0));
+  double weighted_fsd = (fsd - fsd1) * inv_fsd_interval + 1.0;
+  int ifsd = static_cast<int>(weighted_fsd);
+  ifsd = ifsd < 1 ? 1 : (ifsd > nfsd - 1 ? nfsd - 1 : ifsd);
+  weighted_fsd = fmax(0.0, fmin(weighted_fsd - ifsd, 1.0));
+  const int c0 = icdf - 1;
+  const int f0 = ifsd - 1;
+  return (1.0 - weighted_cdf) * (1.0 - weighted_fsd) * values[c0 + ncdf * f0]
+      + (1.0 - weighted_cdf) * weighted_fsd * values[c0 + ncdf * (f0 + 1)]
+      + weighted_cdf * (1.0 - weighted_fsd) * values[c0 + 1 + ncdf * f0]
+      + weighted_cdf * weighted_fsd * values[c0 + 1 + ncdf * (f0 + 1)];
+}
+
+__global__ void cloud_generator_kernel(
+    int ng, int nlev, int ncol, int overlap_scheme, bool beta_overlap,
+    const int* seeds, const double* active, double fraction_threshold,
+    const double* fraction, const double* overlap_parameter,
+    double decorrelation_scaling, const double* fractional_std,
+    int pdf_ncdf, int pdf_nfsd, double pdf_fsd1,
+    double pdf_inv_fsd_interval, const double* pdf_values,
+    double* od_scaling, double* total_cloud_cover,
+    double* cumulative_cover, double* pair_cover, double* overhang,
+    double* overlap_inhom, double* random_top, double* random_cloud,
+    double* random_inhom1, double* random_inhom2,
+    std::uint32_t* random_state) {
+  const int col = blockIdx.x * blockDim.x + threadIdx.x;
+  if (col >= ncol) return;
+  const auto profile = [=](int lev) {
+    return col + static_cast<std::size_t>(ncol) * lev;
+  };
+  const auto scaling = [=](int g, int lev) {
+    return g + static_cast<std::size_t>(ng) *
+        (lev + static_cast<std::size_t>(nlev) * col);
+  };
+  for (int lev = 0; lev < nlev; ++lev)
+    for (int g = 0; g < ng; ++g) od_scaling[scaling(g, lev)] = 0.0;
+  total_cloud_cover[col] = 0.0;
+  if (active[col] <= 0.0) return;
+
+  constexpr double max_cloud_fraction = 1.0 - 2.2204460492503131e-15;
+  double cumulative_product = 1.0 - fraction[profile(0)];
+  cumulative_cover[profile(0)] = fraction[profile(0)];
+  for (int lev = 0; lev < nlev - 1; ++lev) {
+    const double upper = fraction[profile(lev)];
+    const double lower = fraction[profile(lev + 1)];
+    double pair;
+    if (overlap_scheme == 0) {
+      pair = upper > lower ? upper : lower;
+    } else {
+      double alpha = overlap_parameter[profile(lev)];
+      if (beta_overlap) alpha = cloud_beta_to_alpha(alpha, upper, lower);
+      const double maximum = upper > lower ? upper : lower;
+      pair = alpha * maximum + (1.0 - alpha) *
+          (upper + lower - upper * lower);
+    }
+    pair_cover[profile(lev)] = pair;
+    if (upper >= max_cloud_fraction) cumulative_product = 0.0;
+    else cumulative_product *= (1.0 - pair) / (1.0 - upper);
+    cumulative_cover[profile(lev + 1)] = 1.0 - cumulative_product;
+    overhang[profile(lev)] = cumulative_cover[profile(lev + 1)]
+        - cumulative_cover[profile(lev)];
+  }
+  const double cover = cumulative_cover[profile(nlev - 1)];
+  if (cover < fraction_threshold) return;
+  total_cloud_cover[col] = cover;
+
+  int begin = 0;
+  while (begin < nlev && fraction[profile(begin)] <= 0.0) ++begin;
+  if (begin == nlev) return;
+  int end = begin;
+  for (int lev = begin + 1; lev < nlev; ++lev)
+    if (fraction[profile(lev)] > 0.0) end = lev;
+  for (int lev = 0; lev < nlev - 1; ++lev)
+    overlap_inhom[profile(lev)] = overlap_parameter[profile(lev)];
+  for (int lev = begin; lev < end; ++lev) {
+    const double overlap = overlap_parameter[profile(lev)];
+    if (overlap > 0.0)
+      overlap_inhom[profile(lev)] = pow(overlap, 1.0 / decorrelation_scaling);
+  }
+
+  std::uint32_t* state = random_state + static_cast<std::size_t>(607) * col;
+  int used;
+  cloud_rng_initialize(seeds[col], state, used);
+  for (int g = 0; g < ng; ++g)
+    random_top[g + static_cast<std::size_t>(ng) * col] = cloud_rng_next(state, used);
+  for (int g = 0; g < ng; ++g) {
+    const double trigger = random_top[g + static_cast<std::size_t>(ng) * col] * cover;
+    int trigger_level = begin;
+    while (trigger > cumulative_cover[profile(trigger_level)] &&
+           trigger_level < end) ++trigger_level;
+
+    const int cloud_random_count = end + 1 - trigger_level;
+    for (int j = 0; j < cloud_random_count; ++j)
+      random_cloud[profile(j)] = cloud_rng_next(state, used);
+    int random_index = 0;
+    int layers_to_scale = 1;
+    for (int level = trigger_level + 1; level <= end + 1; ++level) {
+      bool fill_scaling = false;
+      if (level <= end) {
+        const double random = random_cloud[profile(random_index++)];
+        const int above = level - 1;
+        if (layers_to_scale > 0) {
+          if (random * fraction[profile(above)] <
+              fraction[profile(level)] + fraction[profile(above)]
+                  - pair_cover[profile(above)]) {
+            ++layers_to_scale;
+          } else {
+            fill_scaling = true;
+          }
+        } else if (random * (cumulative_cover[profile(above)]
+                       - fraction[profile(above)]) <
+                   pair_cover[profile(above)] - overhang[profile(above)]
+                       - fraction[profile(above)]) {
+          layers_to_scale = 1;
+        }
+      } else {
+        fill_scaling = true;
+      }
+
+      if (fill_scaling) {
+        for (int j = 0; j < layers_to_scale; ++j)
+          random_inhom1[profile(j)] = cloud_rng_next(state, used);
+        for (int j = 0; j < layers_to_scale; ++j)
+          random_inhom2[profile(j)] = cloud_rng_next(state, used);
+        const int first_level = level - layers_to_scale;
+        for (int j = 1; j < layers_to_scale; ++j) {
+          if (random_inhom2[profile(j)] <
+              overlap_inhom[profile(first_level + j - 1)])
+            random_inhom1[profile(j)] = random_inhom1[profile(j - 1)];
+        }
+        for (int j = 0; j < layers_to_scale; ++j) {
+          const int cloud_level = first_level + j;
+          od_scaling[scaling(g, cloud_level)] = cloud_pdf_sample(
+              fractional_std[profile(cloud_level)], random_inhom1[profile(j)],
+              pdf_ncdf, pdf_nfsd, pdf_fsd1, pdf_inv_fsd_interval, pdf_values);
+        }
+        layers_to_scale = 0;
+      }
+    }
+  }
+}
+
 bool copy_to_device(void* dst, const void* src, std::size_t bytes, const char* name) {
   return cuda_ok(cudaMemcpyAsync(dst, src, bytes, cudaMemcpyHostToDevice, workspace.stream), name);
 }
@@ -780,6 +1065,16 @@ bool copy_to_longwave_device(void* dst, const void* src, std::size_t bytes, cons
 bool copy_from_longwave_device(void* dst, const void* src, std::size_t bytes, const char* name) {
   return cuda_ok(cudaMemcpyAsync(dst, src, bytes, cudaMemcpyDeviceToHost,
                                  longwave_workspace.stream), name);
+}
+
+bool copy_to_cloud_device(void* dst, const void* src, std::size_t bytes, const char* name) {
+  return cuda_ok(cudaMemcpyAsync(dst, src, bytes, cudaMemcpyHostToDevice,
+                                 cloud_workspace.stream), name);
+}
+
+bool copy_from_cloud_device(void* dst, const void* src, std::size_t bytes, const char* name) {
+  return cuda_ok(cudaMemcpyAsync(dst, src, bytes, cudaMemcpyDeviceToHost,
+                                 cloud_workspace.stream), name);
 }
 
 }  // namespace
@@ -995,10 +1290,66 @@ extern "C" int oifs_cuda_lw_compute_dp(
   return 0;
 }
 
+extern "C" int oifs_cuda_cloud_compute_dp(
+    int ng, int nlev, int ncol, int overlap_scheme, int is_beta_overlap,
+    const int* seeds, const double* active, double frac_threshold,
+    const double* cloud_fraction, const double* overlap_parameter,
+    double decorrelation_scaling, const double* fractional_std,
+    int pdf_ncdf, int pdf_nfsd, double pdf_fsd1,
+    double pdf_inv_fsd_interval, const double* pdf_values,
+    double* od_scaling, double* total_cloud_cover) {
+  std::lock_guard<std::mutex> lock(workspace_mutex);
+  last_error.clear();
+  if (ng <= 0 || nlev <= 1 || ncol <= 0 || pdf_ncdf < 2 || pdf_nfsd < 2) {
+    last_error = "invalid cloud-generator dimensions";
+    return 1;
+  }
+  if (overlap_scheme != 0 && overlap_scheme != 1) {
+    last_error = "cloud overlap scheme is not implemented by CUDA";
+    return 7;
+  }
+  if (!select_device()) return 2;
+  if (!ensure_cloud_workspace(ng, nlev, ncol, pdf_ncdf, pdf_nfsd)) return 2;
+  auto& cloud = cloud_workspace;
+  const std::size_t profile = static_cast<std::size_t>(ncol) * nlev;
+  const std::size_t interfaces = static_cast<std::size_t>(ncol) * (nlev - 1);
+  const std::size_t scaling = static_cast<std::size_t>(ng) * nlev * ncol;
+  const std::size_t pdf_size = static_cast<std::size_t>(pdf_ncdf) * pdf_nfsd;
+#define COPY_CLOUD_IN(member, src, count)                                        \
+  if (!copy_to_cloud_device(cloud.member, src, (count) * sizeof(*(src)),          \
+                            "copy cloud " #member)) return 3
+  COPY_CLOUD_IN(seeds, seeds, ncol);
+  COPY_CLOUD_IN(active, active, ncol);
+  COPY_CLOUD_IN(cloud_fraction, cloud_fraction, profile);
+  COPY_CLOUD_IN(overlap_parameter, overlap_parameter, interfaces);
+  COPY_CLOUD_IN(fractional_std, fractional_std, profile);
+  COPY_CLOUD_IN(pdf_values, pdf_values, pdf_size);
+#undef COPY_CLOUD_IN
+  constexpr int block_size = 64;
+  const int blocks = (ncol + block_size - 1) / block_size;
+  cloud_generator_kernel<<<blocks, block_size, 0, cloud.stream>>>(
+      ng, nlev, ncol, overlap_scheme, is_beta_overlap != 0, cloud.seeds,
+      cloud.active, frac_threshold, cloud.cloud_fraction,
+      cloud.overlap_parameter, decorrelation_scaling, cloud.fractional_std,
+      pdf_ncdf, pdf_nfsd, pdf_fsd1, pdf_inv_fsd_interval, cloud.pdf_values,
+      cloud.od_scaling, cloud.total_cloud_cover, cloud.cumulative_cover,
+      cloud.pair_cover, cloud.overhang, cloud.overlap_inhom, cloud.random_top,
+      cloud.random_cloud, cloud.random_inhom1, cloud.random_inhom2,
+      cloud.random_state);
+  if (!cuda_ok(cudaGetLastError(), "cloud-generator kernel launch")) return 4;
+  if (!copy_from_cloud_device(od_scaling, cloud.od_scaling,
+                              scaling * sizeof(double), "copy cloud od_scaling")) return 5;
+  if (!copy_from_cloud_device(total_cloud_cover, cloud.total_cloud_cover,
+                              ncol * sizeof(double), "copy cloud cover")) return 5;
+  if (!cuda_ok(cudaStreamSynchronize(cloud.stream), "cloud-generator synchronize")) return 6;
+  return 0;
+}
+
 extern "C" void oifs_cuda_radiation_finalize(void) {
   std::lock_guard<std::mutex> lock(workspace_mutex);
   release_workspace();
   release_longwave_workspace();
+  release_cloud_workspace();
 }
 
 extern "C" const char* oifs_cuda_radiation_last_error(void) {

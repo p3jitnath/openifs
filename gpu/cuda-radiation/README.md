@@ -55,6 +55,9 @@ Optional controls are:
 
 - `OIFS_GPU_NPROMA`: automatic radiation batch size; default `512`.
 - `OIFS_GPU_MIN_COLUMNS`: do not offload smaller calls; default `256`.
+- `OIFS_GPU_CLOUD=1`: enable the experimental CUDA McICA cloud generator.
+  It is disabled by default because the current serial-per-column RNG kernel
+  is slower when several MPI ranks share one GPU.
 - `OIFS_CUDA_DEVICE`: zero-based CUDA device index; default `0`.
 - `OIFS_GPU_VALIDATE=1`: calculate both CPU and GPU results, compare every
   returned field, abort on a mismatch, then continue with the GPU result.

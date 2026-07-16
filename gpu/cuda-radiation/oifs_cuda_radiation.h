@@ -37,6 +37,15 @@ int oifs_cuda_lw_compute_dp(
     double* lw_dn_surf_clear_g, double* lw_dn_surf_g,
     double* lw_derivatives);
 
+int oifs_cuda_cloud_compute_dp(
+    int ng, int nlev, int ncol, int overlap_scheme, int is_beta_overlap,
+    const int* seeds, const double* active, double frac_threshold,
+    const double* cloud_fraction, const double* overlap_parameter,
+    double decorrelation_scaling, const double* fractional_std,
+    int pdf_ncdf, int pdf_nfsd, double pdf_fsd1,
+    double pdf_inv_fsd_interval, const double* pdf_values,
+    double* od_scaling, double* total_cloud_cover);
+
 void oifs_cuda_radiation_finalize(void);
 const char* oifs_cuda_radiation_last_error(void);
 

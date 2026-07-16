@@ -21,6 +21,7 @@ module radiation_mcica_lw
   logical, save :: gpu_enabled_option = .false.
   logical, save :: gpu_available_option = .false.
   logical, save :: gpu_validate_option = .false.
+  logical, save :: gpu_cloud_enabled_option = .false.
   integer, save :: gpu_min_columns_option = 256
 #endif
 
@@ -57,7 +58,8 @@ contains
     use radiation_lw_derivatives, only : calc_lw_derivatives_ica, modify_lw_derivatives_ica
     use radiation_cloud_generator, only: cloud_generator
 #ifdef OIFS_CUDA_RADIATION
-    use radiation_cuda_bridge, only   : cuda_radiation_available, cuda_lw_compute
+    use radiation_cuda_bridge, only   : cuda_radiation_available, cuda_lw_compute, &
+         &                              cuda_cloud_compute
 #endif
 
     implicit none
@@ -111,6 +113,8 @@ contains
 #ifdef OIFS_CUDA_RADIATION
     real(jprb), allocatable, dimension(:,:,:) :: od_scaling_batch
     real(jprb), allocatable, dimension(:) :: total_cloud_cover_batch
+    real(jprb), allocatable, dimension(:) :: cloud_active_batch
+    integer, allocatable, dimension(:) :: cloud_seed_batch
     real(jprb), allocatable, dimension(:,:) :: gpu_lw_up_clear, gpu_lw_dn_clear
     real(jprb), allocatable, dimension(:,:) :: gpu_lw_up, gpu_lw_dn
     real(jprb), allocatable, dimension(:,:) :: gpu_lw_dn_surf_clear_g
@@ -151,8 +155,10 @@ contains
 #ifdef OIFS_CUDA_RADIATION
     logical :: use_gpu_lw, validate_gpu_lw
     character(len=32) :: gpu_radiation_env, gpu_min_columns_env, gpu_validate_env
+    character(len=32) :: gpu_cloud_env
     integer :: gpu_min_columns, gpu_status, env_read_status
-    real(jprb) :: gpu_error_ratio
+    real(jprb) :: gpu_error_ratio, gpu_cloud_error_ratio
+    real(jprb) :: gpu_cloud_scaling_max_abs, gpu_cloud_cover_max_abs
 #endif
 
     real(jphook) :: hook_handle
@@ -175,6 +181,9 @@ contains
       gpu_validate_env = ''
       call get_environment_variable('OIFS_GPU_VALIDATE',gpu_validate_env)
       gpu_validate_option = trim(gpu_validate_env) == '1'
+      gpu_cloud_env = ''
+      call get_environment_variable('OIFS_GPU_CLOUD',gpu_cloud_env)
+      gpu_cloud_enabled_option = trim(gpu_cloud_env) == '1'
       gpu_min_columns_option = 256
       gpu_min_columns_env = ''
       call get_environment_variable('OIFS_GPU_MIN_COLUMNS',gpu_min_columns_env)
@@ -198,6 +207,8 @@ contains
     if (use_gpu_lw) then
       allocate(od_scaling_batch(ng,nlev,istartcol:iendcol), &
            & total_cloud_cover_batch(istartcol:iendcol), &
+           & cloud_active_batch(istartcol:iendcol), &
+           & cloud_seed_batch(istartcol:iendcol), &
            & gpu_lw_up_clear(istartcol:iendcol,nlev+1), &
            & gpu_lw_dn_clear(istartcol:iendcol,nlev+1), &
            & gpu_lw_up(istartcol:iendcol,nlev+1), &
@@ -205,14 +216,34 @@ contains
            & gpu_lw_dn_surf_clear_g(ng,istartcol:iendcol), &
            & gpu_lw_dn_surf_g(ng,istartcol:iendcol), &
            & gpu_lw_derivatives(istartcol:iendcol,nlev+1))
-      do jcol = istartcol,iendcol
-        call cloud_generator(ng,nlev,config%i_overlap_scheme, &
-             & single_level%iseed(jcol)+997,config%cloud_fraction_threshold, &
-             & cloud%fraction(jcol,:),cloud%overlap_param(jcol,:), &
-             & config%cloud_inhom_decorr_scaling,cloud%fractional_std(jcol,:), &
-             & config%pdf_sampler,od_scaling_batch(:,:,jcol), &
-             & total_cloud_cover_batch(jcol),is_beta_overlap=config%use_beta_overlap)
-      end do
+      cloud_active_batch = 1.0_jprb
+      cloud_seed_batch = single_level%iseed(istartcol:iendcol)+997
+      gpu_status = 7
+      if (gpu_cloud_enabled_option) then
+        gpu_status = cuda_cloud_compute(ng,nlev,iendcol-istartcol+1, &
+             & config%i_overlap_scheme,config%use_beta_overlap,cloud_seed_batch, &
+             & cloud_active_batch,config%cloud_fraction_threshold, &
+             & cloud%fraction(istartcol:iendcol,:), &
+             & cloud%overlap_param(istartcol:iendcol,:), &
+             & config%cloud_inhom_decorr_scaling, &
+             & cloud%fractional_std(istartcol:iendcol,:),config%pdf_sampler%ncdf, &
+             & config%pdf_sampler%nfsd,config%pdf_sampler%fsd1, &
+             & config%pdf_sampler%inv_fsd_interval,config%pdf_sampler%val, &
+             & od_scaling_batch,total_cloud_cover_batch)
+      end if
+      if (gpu_status == 7) then
+        do jcol = istartcol,iendcol
+          call cloud_generator(ng,nlev,config%i_overlap_scheme, &
+               & single_level%iseed(jcol)+997,config%cloud_fraction_threshold, &
+               & cloud%fraction(jcol,:),cloud%overlap_param(jcol,:), &
+               & config%cloud_inhom_decorr_scaling,cloud%fractional_std(jcol,:), &
+               & config%pdf_sampler,od_scaling_batch(:,:,jcol), &
+               & total_cloud_cover_batch(jcol),is_beta_overlap=config%use_beta_overlap)
+        end do
+      else if (gpu_status /= 0) then
+        write(nulerr,'(a,i0)') '*** CUDA cloud generation failed with status ',gpu_status
+        call radiation_abort()
+      end if
       gpu_status = cuda_lw_compute(ng,config%n_bands_lw,nlev,iendcol-istartcol+1, &
            & config%do_lw_aerosol_scattering,config%do_lw_cloud_scattering, &
            & config%do_lw_derivatives,od,ssa,g,planck_hl,emission,albedo, &
@@ -242,6 +273,11 @@ contains
 #endif
 
     ! Loop through columns
+#ifdef OIFS_CUDA_RADIATION
+    gpu_cloud_error_ratio = 0.0_jprb
+    gpu_cloud_scaling_max_abs = 0.0_jprb
+    gpu_cloud_cover_max_abs = 0.0_jprb
+#endif
     do jcol = istartcol,iendcol
 
       ! Clear-sky calculation
@@ -299,6 +335,23 @@ contains
            &  config%cloud_inhom_decorr_scaling, cloud%fractional_std(jcol,:), &
            &  config%pdf_sampler, od_scaling, total_cloud_cover, &
            &  is_beta_overlap=config%use_beta_overlap)
+
+#ifdef OIFS_CUDA_RADIATION
+      if (use_gpu_lw .and. validate_gpu_lw) then
+        if (total_cloud_cover >= config%cloud_fraction_threshold) then
+          gpu_cloud_error_ratio = max(gpu_cloud_error_ratio,maxval(abs(od_scaling &
+               & -od_scaling_batch(:,:,jcol)) / (1.0e-13_jprb+2.0e-12_jprb &
+               & *max(abs(od_scaling),abs(od_scaling_batch(:,:,jcol))))))
+          gpu_cloud_scaling_max_abs = max(gpu_cloud_scaling_max_abs, &
+               & maxval(abs(od_scaling-od_scaling_batch(:,:,jcol))))
+        end if
+        gpu_cloud_error_ratio = max(gpu_cloud_error_ratio,abs(total_cloud_cover &
+             & -total_cloud_cover_batch(jcol)) / (1.0e-13_jprb+2.0e-12_jprb &
+             & *max(abs(total_cloud_cover),abs(total_cloud_cover_batch(jcol)))))
+        gpu_cloud_cover_max_abs = max(gpu_cloud_cover_max_abs, &
+             & abs(total_cloud_cover-total_cloud_cover_batch(jcol)))
+      end if
+#endif
       
       ! Store total cloud cover
       flux%cloud_cover_lw(jcol) = total_cloud_cover
@@ -442,6 +495,14 @@ contains
 
 #ifdef OIFS_CUDA_RADIATION
     if (use_gpu_lw .and. validate_gpu_lw) then
+      if (gpu_cloud_error_ratio > 1.0_jprb) then
+        write(nulerr,'(a,es12.4)') &
+             & '*** CUDA longwave cloud validation failed; normalized max error = ', &
+             & gpu_cloud_error_ratio
+        write(nulerr,'(a,es12.4)') '    od_scaling max abs = ',gpu_cloud_scaling_max_abs
+        write(nulerr,'(a,es12.4)') '    cloud cover max abs = ',gpu_cloud_cover_max_abs
+        call radiation_abort()
+      end if
       gpu_error_ratio = 0.0_jprb
       gpu_error_ratio = max(gpu_error_ratio,maxval(abs(flux%lw_up_clear(istartcol:iendcol,:)-gpu_lw_up_clear) &
            & / (1.0e-5_jprb + 2.0e-12_jprb*max(abs(flux%lw_up_clear(istartcol:iendcol,:)),abs(gpu_lw_up_clear)))))
