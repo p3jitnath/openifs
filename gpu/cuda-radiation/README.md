@@ -82,11 +82,13 @@ before choosing production batch and rank-to-device settings.
 On the bundled 24-hour `ab7z` 3D experiment with four MPI ranks sharing one
 GH200 and `OIFS_GPU_NPROMA=2048`, enabling the CUDA cloud generator reduced
 the sum of the 25 reported model-step times from 83.014 s (CUDA SW+LW) to
-82.113 s (CUDA SW+LW+cloud), a 1.09% end-to-end gain. The optimized path keeps
-separate shortwave and longwave cloud workspaces and consumes cloud scaling
-directly on the device, avoiding repeated CUDA allocation and a device-host-
-device round trip. At smaller batch sizes the cloud kernel may still lose to
-CPU generation, so `OIFS_GPU_NPROMA` should be tuned for the target layout.
+78.378 s (CUDA SW+LW+cloud), a 5.59% end-to-end gain. The optimized path keeps
+separate shortwave and longwave cloud workspaces, consumes cloud scaling
+directly on the device, and initializes each column's RNG cooperatively across
+a CUDA warp. This avoids repeated CUDA allocation, a device-host-device round
+trip, and the serial construction of 29 RNG bit planes. At smaller batch sizes
+the cloud kernel may still lose to CPU generation, so `OIFS_GPU_NPROMA` should
+be tuned for the target layout.
 
 Full OpenIFS shortwave validation found a maximum CPU/GPU absolute difference
 of `5.91e-9` in diffuse flux after the vertical adding recurrence, while direct

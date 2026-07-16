@@ -885,34 +885,74 @@ __device__ inline double cloud_rng_next(std::uint32_t* state, int& used) {
   return static_cast<double>(state[used++]) * (1.0 / 1073741824.0);
 }
 
-__device__ void cloud_rng_initialize(int seed, std::uint32_t* state, int& used) {
-  constexpr std::uint32_t mask = 123459876U;
+__device__ __constant__ std::uint32_t cloud_rng_jump_604[32] = {
+  0x29c7fc9aU, 0x538ff934U, 0xa71ff268U, 0x4e3fe47fU,
+  0x9c7fc8feU, 0x38ff9153U, 0x71ff22a6U, 0xe3fe454cU,
+  0xc7fc8a37U, 0x8ff914c1U, 0x1ff2292dU, 0x3fe4525aU,
+  0x7fc8a4b4U, 0xff914968U, 0xff22927fU, 0xfe452451U,
+  0xfc8a480dU, 0xf91490b5U, 0xf22921c5U, 0xe4524325U,
+  0xc8a486e5U, 0x91490d65U, 0x22921a65U, 0x452434caU,
+  0x8a486994U, 0x1490d387U, 0x2921a70eU, 0x52434e1cU,
+  0xa4869c38U, 0x490d38dfU, 0x921a71beU, 0x2434e3d3U
+};
+
+__device__ inline std::uint32_t cloud_rng_step(std::uint32_t value) {
+  return (value << 1U) ^ ((value & 0x80000000U) ? 0xafU : 0U);
+}
+
+__device__ inline std::uint32_t cloud_rng_advance_604(std::uint32_t value) {
+  std::uint32_t advanced = 0;
+#pragma unroll
+  for (int bit = 0; bit < 32; ++bit)
+    if (value & (1U << bit)) advanced ^= cloud_rng_jump_604[bit];
+  return advanced;
+}
+
+__device__ void cloud_rng_generate_warp(std::uint32_t* state, int lane) {
+  constexpr std::uint32_t mask = 0x3fffffffU;
+  for (int j = lane; j < 273; j += 32)
+    state[j] = mask & (state[j] + state[j + 334]);
+  __syncwarp();
+  for (int j = 273 + lane; j < 546; j += 32)
+    state[j] = mask & (state[j] + state[j - 273]);
+  __syncwarp();
+  for (int j = 546 + lane; j < 607; j += 32)
+    state[j] = mask & (state[j] + state[j - 273]);
+  __syncwarp();
+}
+
+__device__ void cloud_rng_initialize_warp(
+    int seed, std::uint32_t* state, int lane) {
+  constexpr std::uint32_t seed_mask = 123459876U;
   std::int32_t signed_value = static_cast<std::int32_t>(
-      static_cast<std::uint32_t>(seed) ^ mask);
+      static_cast<std::uint32_t>(seed) ^ seed_mask);
   if (signed_value < 0) signed_value = -signed_value;
-  std::uint32_t value = static_cast<std::uint32_t>(signed_value);
-  if (value == 0) value = mask;
-  for (int spin = 0; spin < 64; ++spin) {
-    const bool high_bit = (value & 0x80000000U) != 0;
-    value = high_bit ? ((value ^ 87U) << 1U) | 1U : value << 1U;
+  std::uint32_t initial_value = static_cast<std::uint32_t>(signed_value);
+  if (initial_value == 0) initial_value = seed_mask;
+  for (int spin = 0; spin < 64; ++spin)
+    initial_value = cloud_rng_step(initial_value);
+
+  std::uint32_t value = initial_value;
+  for (int plane = 0; plane < lane && lane < 29; ++plane)
+    value = cloud_rng_advance_604(value);
+  for (int j = 2; j <= 605; ++j) {
+    const unsigned int plane_bits = __ballot_sync(
+        0xffffffffU, lane < 29 && (value & 0x80000000U));
+    if (lane == 0) state[j] = (plane_bits & 0x1fffffffU) << 1U;
+    if (lane < 29) value = cloud_rng_step(value);
   }
-  for (int j = 0; j < 607; ++j) state[j] = 0;
-  state[1] = (value & 0x1fffffffU) << 1U;
-  state[606] = (value >> 29U) & 0x7U;
-  for (int bit = 1; bit <= 29; ++bit) {
-    for (int j = 2; j <= 605; ++j) {
-      const bool high_bit = (value & 0x80000000U) != 0;
-      if (high_bit) {
-        value = ((value ^ 87U) << 1U) | 1U;
-        state[j] |= 1U << bit;
-      } else {
-        value <<= 1U;
-      }
-    }
+  if (lane == 0) {
+    state[0] = 0;
+    state[1] = (initial_value & 0x1fffffffU) << 1U;
+    state[606] = (initial_value >> 29U) & 0x7U;
+    state[501] |= 1U;
   }
-  state[501] |= 1U;
-  used = 607;
-  for (int j = 0; j < 999; ++j) (void)cloud_rng_next(state, used);
+  __syncwarp();
+
+  // The 999-value warm-up triggers two state generations and leaves the
+  // second generated state positioned at element 392.
+  cloud_rng_generate_warp(state, lane);
+  cloud_rng_generate_warp(state, lane);
 }
 
 __device__ inline double cloud_beta_to_alpha(
@@ -954,7 +994,9 @@ __global__ void cloud_generator_kernel(
     double* overlap_inhom, double* random_top, double* random_cloud,
     double* random_inhom1, double* random_inhom2,
     std::uint32_t* random_state) {
-  const int col = blockIdx.x * blockDim.x + threadIdx.x;
+  const int lane = threadIdx.x & 31;
+  const int warps_per_block = blockDim.x / 32;
+  const int col = blockIdx.x * warps_per_block + threadIdx.x / 32;
   if (col >= ncol) return;
   const auto profile = [=](int lev) {
     return col + static_cast<std::size_t>(ncol) * lev;
@@ -963,55 +1005,66 @@ __global__ void cloud_generator_kernel(
     return g + static_cast<std::size_t>(ng) *
         (lev + static_cast<std::size_t>(nlev) * col);
   };
-  for (int lev = 0; lev < nlev; ++lev)
-    for (int g = 0; g < ng; ++g) od_scaling[scaling(g, lev)] = 0.0;
-  total_cloud_cover[col] = 0.0;
-  if (active[col] <= 0.0) return;
-
   constexpr double max_cloud_fraction = 1.0 - 2.2204460492503131e-15;
-  double cumulative_product = 1.0 - fraction[profile(0)];
-  cumulative_cover[profile(0)] = fraction[profile(0)];
-  for (int lev = 0; lev < nlev - 1; ++lev) {
-    const double upper = fraction[profile(lev)];
-    const double lower = fraction[profile(lev + 1)];
-    double pair;
-    if (overlap_scheme == 0) {
-      pair = upper > lower ? upper : lower;
-    } else {
-      double alpha = overlap_parameter[profile(lev)];
-      if (beta_overlap) alpha = cloud_beta_to_alpha(alpha, upper, lower);
-      const double maximum = upper > lower ? upper : lower;
-      pair = alpha * maximum + (1.0 - alpha) *
-          (upper + lower - upper * lower);
-    }
-    pair_cover[profile(lev)] = pair;
-    if (upper >= max_cloud_fraction) cumulative_product = 0.0;
-    else cumulative_product *= (1.0 - pair) / (1.0 - upper);
-    cumulative_cover[profile(lev + 1)] = 1.0 - cumulative_product;
-    overhang[profile(lev)] = cumulative_cover[profile(lev + 1)]
-        - cumulative_cover[profile(lev)];
-  }
-  const double cover = cumulative_cover[profile(nlev - 1)];
-  if (cover < fraction_threshold) return;
-  total_cloud_cover[col] = cover;
-
+  double cover = 0.0;
   int begin = 0;
-  while (begin < nlev && fraction[profile(begin)] <= 0.0) ++begin;
-  if (begin == nlev) return;
-  int end = begin;
-  for (int lev = begin + 1; lev < nlev; ++lev)
-    if (fraction[profile(lev)] > 0.0) end = lev;
-  for (int lev = 0; lev < nlev - 1; ++lev)
-    overlap_inhom[profile(lev)] = overlap_parameter[profile(lev)];
-  for (int lev = begin; lev < end; ++lev) {
-    const double overlap = overlap_parameter[profile(lev)];
-    if (overlap > 0.0)
-      overlap_inhom[profile(lev)] = pow(overlap, 1.0 / decorrelation_scaling);
+  int end = 0;
+  int generate_randoms = 0;
+  if (lane == 0) {
+    for (int lev = 0; lev < nlev; ++lev)
+      for (int g = 0; g < ng; ++g) od_scaling[scaling(g, lev)] = 0.0;
+    total_cloud_cover[col] = 0.0;
+    if (active[col] > 0.0) {
+      double cumulative_product = 1.0 - fraction[profile(0)];
+      cumulative_cover[profile(0)] = fraction[profile(0)];
+      for (int lev = 0; lev < nlev - 1; ++lev) {
+        const double upper = fraction[profile(lev)];
+        const double lower = fraction[profile(lev + 1)];
+        double pair;
+        if (overlap_scheme == 0) {
+          pair = upper > lower ? upper : lower;
+        } else {
+          double alpha = overlap_parameter[profile(lev)];
+          if (beta_overlap) alpha = cloud_beta_to_alpha(alpha, upper, lower);
+          const double maximum = upper > lower ? upper : lower;
+          pair = alpha * maximum + (1.0 - alpha) *
+              (upper + lower - upper * lower);
+        }
+        pair_cover[profile(lev)] = pair;
+        if (upper >= max_cloud_fraction) cumulative_product = 0.0;
+        else cumulative_product *= (1.0 - pair) / (1.0 - upper);
+        cumulative_cover[profile(lev + 1)] = 1.0 - cumulative_product;
+        overhang[profile(lev)] = cumulative_cover[profile(lev + 1)]
+            - cumulative_cover[profile(lev)];
+      }
+      cover = cumulative_cover[profile(nlev - 1)];
+      if (cover >= fraction_threshold) {
+        total_cloud_cover[col] = cover;
+        while (begin < nlev && fraction[profile(begin)] <= 0.0) ++begin;
+        if (begin < nlev) {
+          end = begin;
+          for (int lev = begin + 1; lev < nlev; ++lev)
+            if (fraction[profile(lev)] > 0.0) end = lev;
+          for (int lev = 0; lev < nlev - 1; ++lev)
+            overlap_inhom[profile(lev)] = overlap_parameter[profile(lev)];
+          for (int lev = begin; lev < end; ++lev) {
+            const double overlap = overlap_parameter[profile(lev)];
+            if (overlap > 0.0)
+              overlap_inhom[profile(lev)] = pow(
+                  overlap, 1.0 / decorrelation_scaling);
+          }
+          generate_randoms = 1;
+        }
+      }
+    }
   }
+  generate_randoms = __shfl_sync(0xffffffffU, generate_randoms, 0);
+  if (!generate_randoms) return;
 
   std::uint32_t* state = random_state + static_cast<std::size_t>(607) * col;
-  int used;
-  cloud_rng_initialize(seeds[col], state, used);
+  cloud_rng_initialize_warp(seeds[col], state, lane);
+  if (lane != 0) return;
+  int used = 392;
   for (int g = 0; g < ng; ++g)
     random_top[g + static_cast<std::size_t>(ng) * col] = cloud_rng_next(state, used);
   for (int g = 0; g < ng; ++g) {
@@ -1374,7 +1427,8 @@ extern "C" int oifs_cuda_cloud_compute_dp(
   COPY_CLOUD_IN(pdf_values, pdf_values, pdf_size);
 #undef COPY_CLOUD_IN
   constexpr int block_size = 64;
-  const int blocks = (ncol + block_size - 1) / block_size;
+  constexpr int columns_per_block = block_size / 32;
+  const int blocks = (ncol + columns_per_block - 1) / columns_per_block;
   cloud_generator_kernel<<<blocks, block_size, 0, cloud.stream>>>(
       ng, nlev, ncol, overlap_scheme, is_beta_overlap != 0, cloud.seeds,
       cloud.active, frac_threshold, cloud.cloud_fraction,
