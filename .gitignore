@@ -9,6 +9,23 @@
 # ecbundle (cloned at build time by openifs-bundle)
 /ecbundle/
 
+# Local forecast work and rebuilt runtimes, never part of the source tree
+/.checks/
+/.deps/
+/runtime-*/
+/experiments/
+/openifs-expt/
+/outputs/
+/failed-runs/
+/logs/
+/openifs-data/climate.v020/
+/openifs-data/ifsdata/
+/openifs-data/rtables/
+/openifs-data/*.tar.gz
+/*.slurm
+/core
+/core.*
+
 # Python
 __pycache__/
 *.pyc

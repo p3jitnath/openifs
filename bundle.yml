@@ -44,8 +44,8 @@ projects :
             ECCODES_ENABLE_FORTRAN=ON
             ECCODES_ENABLE_MEMFS=ON
             ECCODES_INSTALL_EXTRA_TOOLS=ON
-            ECCODES_ENABLE_AEC=OFF
-            ENABLE_AEC=OFF
+            ECCODES_ENABLE_AEC=ON
+            ENABLE_AEC=ON
             ECCODES_ENABLE_JPG_LIBOPENJPEG=OFF
 
     - eckit :
