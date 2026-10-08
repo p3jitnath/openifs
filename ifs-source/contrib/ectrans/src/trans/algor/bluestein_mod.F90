@@ -17,7 +17,7 @@ MODULE BLUESTEIN_MOD
 !
 ! The naming convention follows the algorithm description in the above paper.
 !
-USE PARKIND1, ONLY : JPIM, JPRB
+USE PARKIND1, ONLY : JPIM, JPRB, JPRD
 
 IMPLICIT NONE
 
@@ -237,7 +237,11 @@ INTEGER(KIND=JPIM) :: ICURR,IPREV
 INTEGER(KIND=JPIM) :: IJUMP,ILOT,IINC,IFFTSIGN
 
 LOGICAL :: LLUSEFFT992
-REAL(KIND=JPRB) :: DEL,ANGLE,ZSIGN
+REAL(KIND=JPRB) :: ZSIGN
+! The chirp phase grows as K**2/N. Compute it and its trigonometric
+! functions in double precision before storing model-precision factors.
+! Single-precision angles otherwise lose accuracy on long octahedral rows.
+REAL(KIND=JPRD) :: DEL,ANGLE
 
 ! determine number of PO2 FFT sizes needed by Bluestein FFTs
 M=1
@@ -297,7 +301,7 @@ DO JLAT=1,TB%NLAT_COUNT
   TB%FFTB(N)%NSIZE=N
 
 
-  DEL=2.0D0*ASIN(1.0D0)/REAL(N,JPRB)
+  DEL=2.0_JPRD*ASIN(1.0_JPRD)/REAL(N,JPRD)
 
   ALLOCATE(TB%FFTB(N)%HS(2,0:N-1,2))
   ALLOCATE(TB%FFTB(N)%H2xT(2,0:(M/2+1)*2,2))
@@ -315,7 +319,7 @@ DO JLAT=1,TB%NLAT_COUNT
     ! conjugate bluestein sequence
 
     DO K=0,N-1
-      ANGLE=REAL(K*K,JPRB)*DEL
+      ANGLE=REAL(K,JPRD)*REAL(K,JPRD)*DEL
       TB%FFTB(N)%HS(1,K,ISIGN)=COS(ANGLE)
       TB%FFTB(N)%HS(2,K,ISIGN)=ZSIGN*SIN(ANGLE)
     ENDDO
