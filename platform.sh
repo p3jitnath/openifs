@@ -6,7 +6,7 @@ if ! type module >/dev/null 2>&1; then
 fi
 module load PrgEnv-gnu/8.6.0 || return 1
 module swap gcc-native gcc-native/12.3 || return 1
-module load cray-hdf5/1.14.3.5 cray-netcdf/4.9.0.17 libfabric/1.22.0 || return 1
+module load cray-mpich/8.1.32 cray-hdf5/1.14.3.5 cray-netcdf/4.9.0.17 libfabric/2.3.1 || return 1
 export CC=cc CXX=CC FC=ftn
 oifs_site_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 export PATH="${oifs_site_root}/.build-venv/bin:${PATH}"

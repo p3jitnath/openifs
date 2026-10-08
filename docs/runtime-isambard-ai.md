@@ -2,7 +2,7 @@
 
 ## Build and environment
 
-This profile uses GNU 12.3 through the Cray wrappers, Cray HDF5 1.14.3.5, NetCDF 4.9.0.17 and libfabric 1.22.0. `platform.sh` loads the tested module versions. Do not reuse objects from a different compiler or precision.
+This profile uses GNU 12.3 through the Cray wrappers, Cray MPICH 8.1.32, HDF5 1.14.3.5, NetCDF 4.9.0.17 and libfabric 2.3.1. `platform.sh` loads the tested module versions. The current runtime uses libfabric 2.3.1 because the earlier 1.22.0 module is no longer available. Do not reuse objects from a different compiler or precision.
 
 After cloning the repository and preparing the Python environment in [Installation](../README.md#installation), use
 
